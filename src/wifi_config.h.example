@@ -1,0 +1,12 @@
+// WiFi Configuration
+// Copy this file to wifi_config.h and fill in your WiFi credentials
+// wifi_config.h is gitignored and won't be committed to version control
+
+#ifndef WIFI_CONFIG_H
+#define WIFI_CONFIG_H
+
+const char* ssid = "YOUR_WIFI_SSID";
+const char* password = "YOUR_WIFI_PASSWORD";
+
+#endif
+
