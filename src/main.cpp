@@ -236,6 +236,25 @@ String getHTMLPage() {
   html += "<div style=\"margin-top: 20px;\">";
   html += "<button onclick=\"stopAll()\" style=\"background: #f44336;\">Stop All Motors</button>";
   html += "<button onclick=\"homeAll()\" style=\"background: #2196F3;\">Home All (Move to 0,0)</button>";
+  html += "</div>";
+  
+  // G-code command interface
+  html += "<div class=\"settings\" style=\"margin-top: 20px;\">";
+  html += "<h2>G-code Commands</h2>";
+  html += "<div style=\"margin: 10px 0;\">";
+  html += "<label>Send G-code command:</label><br>";
+  html += "<input type=\"text\" id=\"gcodeCommand\" placeholder=\"G0 X10 Y10\" style=\"width: 300px; padding: 8px; margin: 5px 0;\">";
+  html += "<button onclick=\"sendGcode()\">Send</button>";
+  html += "</div>";
+  html += "<div style=\"margin: 10px 0;\">";
+  html += "<label>Send multiple commands (one per line):</label><br>";
+  html += "<textarea id=\"gcodeMulti\" placeholder=\"G0 X10 Y10&#10;G0 X20 Y20&#10;D X15 Y15\" style=\"width: 100%; height: 100px; padding: 8px; margin: 5px 0; font-family: monospace;\"></textarea>";
+  html += "<button onclick=\"sendGcodeMulti()\">Send All</button>";
+  html += "</div>";
+  html += "<div class=\"status\" id=\"gcodeStatus\" style=\"margin-top: 10px;\">Ready</div>";
+  html += "<div style=\"margin-top: 10px; font-size: 0.9em; color: #666;\">";
+  html += "<strong>Commands:</strong> G0/G1 (move), D (dot), P0/P1 (pen), H (home), M114 (position), ! (stop), ~ (resume)";
+  html += "</div>";
   html += "</div></div>";
   
   // JavaScript
@@ -282,6 +301,41 @@ String getHTMLPage() {
   html += "function setStepMode() {";
   html += "const mode = document.getElementById('stepMode').value;";
   html += "fetch('/setstepmode?mode=' + mode).then(() => alert('Step mode set to ' + mode + '. Please restart ESP32 for changes to take effect.'));";
+  html += "}";
+  html += "function sendGcode() {";
+  html += "const cmd = document.getElementById('gcodeCommand').value.trim();";
+  html += "if (!cmd) return;";
+  html += "document.getElementById('gcodeStatus').textContent = 'Sending: ' + cmd;";
+  html += "fetch('/gcode?cmd=' + encodeURIComponent(cmd))";
+  html += ".then(response => response.text())";
+  html += ".then(data => {";
+  html += "document.getElementById('gcodeStatus').textContent = 'Response: ' + data;";
+  html += "if (data === 'ok') {";
+  html += "document.getElementById('gcodeCommand').value = '';";
+  html += "}";
+  html += "});";
+  html += "}";
+  html += "function sendGcodeMulti() {";
+  html += "const cmds = document.getElementById('gcodeMulti').value.trim().split('\\n');";
+  html += "if (cmds.length === 0 || (cmds.length === 1 && cmds[0] === '')) return;";
+  html += "document.getElementById('gcodeStatus').textContent = 'Sending ' + cmds.length + ' commands...';";
+  html += "let sent = 0;";
+  html += "cmds.forEach((cmd, index) => {";
+  html += "cmd = cmd.trim();";
+  html += "if (cmd) {";
+  html += "setTimeout(() => {";
+  html += "fetch('/gcode?cmd=' + encodeURIComponent(cmd))";
+  html += ".then(response => response.text())";
+  html += ".then(data => {";
+  html += "sent++;";
+  html += "if (sent === cmds.filter(c => c.trim()).length) {";
+  html += "document.getElementById('gcodeStatus').textContent = 'All commands sent (' + sent + ' commands)';";
+  html += "document.getElementById('gcodeMulti').value = '';";
+  html += "}";
+  html += "});";
+  html += "}, index * 50);";  // 50ms delay between commands
+  html += "}";
+  html += "});";
   html += "}";
   html += "setInterval(function() {";
   html += "fetch('/status').then(response => response.json()).then(data => {";
@@ -497,6 +551,49 @@ void handleSetStepMode() {
   }
 }
 
+void handleGcode() {
+  if (server.hasArg("cmd")) {
+    String cmd = server.arg("cmd");
+    cmd.trim();
+    
+    if (cmd.length() == 0) {
+      server.send(400, "text/plain", "error: empty command");
+      return;
+    }
+    
+    // Parse the command
+    Command parsedCmd = parseCommand(cmd);
+    
+    if (!parsedCmd.valid) {
+      server.send(200, "text/plain", "error: " + parsedCmd.errorMsg);
+      return;
+    }
+    
+    // Check if queue is full
+    if (commandQueue.isFull()) {
+      server.send(200, "text/plain", "error: queue full");
+      return;
+    }
+    
+    // Check if we can accept commands
+    if (!stateMachine.canAcceptCommands() && parsedCmd.type != '!' && parsedCmd.type != '~') {
+      server.send(200, "text/plain", "error: plotter not ready (state: " + stateMachine.getStateString() + ")");
+      return;
+    }
+    
+    // Enqueue the command
+    if (commandQueue.enqueue(parsedCmd)) {
+      Serial.print("G-code queued via web: ");
+      Serial.println(cmd);
+      server.send(200, "text/plain", "queued");
+    } else {
+      server.send(200, "text/plain", "error: queue full");
+    }
+  } else {
+    server.send(400, "text/plain", "error: missing command");
+  }
+}
+
 void setup() {
   Serial.begin(115200);
   delay(1000);
@@ -574,6 +671,7 @@ void setup() {
   server.on("/setaccel", handleSetAcceleration);
   server.on("/setpower", handleSetPower);
   server.on("/setstepmode", handleSetStepMode);
+  server.on("/gcode", handleGcode);
   
   server.begin();
   Serial.println("Web server started!");
