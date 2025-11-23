@@ -189,6 +189,28 @@ String getHTMLPage() {
   html += "<button onclick=\"setLimit('Y', 'max')\" style=\"padding: 5px 10px; margin: 2px;\">Set Max Y</button>";
   html += "</div>";
   html += "</div>";
+  html += "<div class=\"settings-row\" style=\"margin-top: 15px; padding-top: 15px; border-top: 1px solid #ccc; background: #fff9c4;\">";
+  html += "<label style=\"font-weight: bold;\">Physical Calibration (Measure with calipers):</label>";
+  html += "<div style=\"margin-top: 10px;\">";
+  html += "<div style=\"margin: 5px 0;\">";
+  html += "<label>Measured X Width (mm):</label>";
+  html += "<input type=\"number\" id=\"measuredXWidth\" value=\"" + String(motionController.getMaxX() - motionController.getMinX(), 2) + "\" min=\"0.1\" max=\"1000\" step=\"0.1\" style=\"width: 100px; margin-left: 10px;\">";
+  html += "<button onclick=\"calibrateFromPhysical('X')\" style=\"padding: 5px 15px; margin-left: 10px; background: #4CAF50; color: white;\">Calculate Steps/mm</button>";
+  html += "</div>";
+  html += "<div style=\"margin: 5px 0;\">";
+  html += "<label>Measured Y Height (mm):</label>";
+  html += "<input type=\"number\" id=\"measuredYHeight\" value=\"" + String(motionController.getMaxY() - motionController.getMinY(), 2) + "\" min=\"0.1\" max=\"1000\" step=\"0.1\" style=\"width: 100px; margin-left: 10px;\">";
+  html += "<button onclick=\"calibrateFromPhysical('Y')\" style=\"padding: 5px 15px; margin-left: 10px; background: #4CAF50; color: white;\">Calculate Steps/mm</button>";
+  html += "</div>";
+  html += "<div style=\"margin-top: 10px; padding: 8px; background: #e8f5e9; border-radius: 5px; font-size: 0.9em;\">";
+  html += "<strong>How to use:</strong><br>";
+  html += "1. Measure the physical width/height of your work area with calipers<br>";
+  html += "2. Enter the measured value above<br>";
+  html += "3. Click 'Calculate Steps/mm' - this will automatically calculate the correct steps/mm<br>";
+  html += "4. The work area limits will be updated to match your measurements";
+  html += "</div>";
+  html += "</div>";
+  html += "</div>";
   html += "<div class=\"settings-row\" style=\"margin-top: 15px; padding-top: 15px; border-top: 1px solid #ccc;\">";
   html += "<label>Axis Direction:</label>";
   html += "<div style=\"display: inline-block; margin-left: 10px;\">";
@@ -534,6 +556,21 @@ String getHTMLPage() {
   html += "fetch('/finishcalibration?motor1Axis=' + m1Axis + '&xMin=' + (calAxis === 'X' ? calMinStep : '') + '&xMax=' + (calAxis === 'X' ? calMaxStep : '') + '&yMin=' + (calAxis === 'Y' ? calMinStep : '') + '&yMax=' + (calAxis === 'Y' ? calMaxStep : '')).then(() => {";
   html += "alert('Calibration complete! You can now set physical dimensions (steps/mm)');";
   html += "location.reload();";
+  html += "});";
+  html += "}";
+  html += "function calibrateFromPhysical(axis) {";
+  html += "const measured = axis === 'X' ? parseFloat(document.getElementById('measuredXWidth').value) : parseFloat(document.getElementById('measuredYHeight').value);";
+  html += "if (measured <= 0) {";
+  html += "alert('Please enter a valid measurement > 0');";
+  html += "return;";
+  html += "}";
+  html += "fetch('/calibratefromphysical?axis=' + axis + '&size=' + measured).then(r => r.text()).then(result => {";
+  html += "if (result === 'ok') {";
+  html += "alert('Calibration complete! Steps/mm and work area updated for ' + axis + ' axis.');";
+  html += "location.reload();";
+  html += "} else {";
+  html += "alert('Error: ' + result);";
+  html += "}";
   html += "});";
   html += "}";
   html += "function flipDirection(axis) {";
@@ -1300,6 +1337,123 @@ void handleFinishCalibration() {
   server.send(200, "text/plain", "ok");
 }
 
+void handleCalibrateFromPhysical() {
+  // Calibrate steps/mm based on measured physical size
+  // Formula: steps/mm = (maxSteps - minSteps) / measuredSize_mm
+  if (server.hasArg("axis") && server.hasArg("size")) {
+    String axisStr = server.arg("axis");
+    float measuredSize = server.arg("size").toFloat();
+    
+    if (measuredSize <= 0) {
+      server.send(400, "text/plain", "error: size must be > 0");
+      return;
+    }
+    
+    // Load step limits from calibration
+    preferences.begin("calibration", true);
+    long minSteps, maxSteps;
+    if (axisStr == "X" || axisStr == "x") {
+      minSteps = preferences.getLong("xMinSteps", 0);
+      maxSteps = preferences.getLong("xMaxSteps", 0);
+    } else if (axisStr == "Y" || axisStr == "y") {
+      minSteps = preferences.getLong("yMinSteps", 0);
+      maxSteps = preferences.getLong("yMaxSteps", 0);
+    } else {
+      preferences.end();
+      server.send(400, "text/plain", "error: invalid axis");
+      return;
+    }
+    preferences.end();
+    
+    // Ensure min < max
+    if (minSteps > maxSteps) {
+      long temp = minSteps;
+      minSteps = maxSteps;
+      maxSteps = temp;
+    }
+    
+    // Calculate steps/mm from physical measurement
+    long stepRange = maxSteps - minSteps;
+    if (stepRange <= 0) {
+      server.send(400, "text/plain", "error: step limits not set (run calibration first)");
+      return;
+    }
+    
+    float newStepsPerMM = stepRange / measuredSize;
+    
+    // Update steps/mm for this axis
+    float x = motionController.getStepsPerMM_X();
+    float y = motionController.getStepsPerMM_Y();
+    
+    if (axisStr == "X" || axisStr == "x") {
+      x = newStepsPerMM;
+    } else {
+      y = newStepsPerMM;
+    }
+    
+    motionController.setStepsPerMM(x, y);
+    
+    // Save steps/mm to preferences
+    preferences.begin("plotter", false);
+    preferences.putFloat("stepsPerMM_X", x);
+    preferences.putFloat("stepsPerMM_Y", y);
+    preferences.end();
+    
+    // Recalculate work area limits based on new steps/mm
+    // Get current work area center and adjust limits to match measured size
+    float currentMinX = motionController.getMinX();
+    float currentMaxX = motionController.getMaxX();
+    float currentMinY = motionController.getMinY();
+    float currentMaxY = motionController.getMaxY();
+    
+    if (axisStr == "X" || axisStr == "x") {
+      // Keep center position, adjust width to measured size
+      float center = (currentMinX + currentMaxX) / 2.0;
+      float newMinX = center - (measuredSize / 2.0);
+      float newMaxX = center + (measuredSize / 2.0);
+      motionController.setWorkArea(newMinX, newMaxX, currentMinY, currentMaxY);
+      
+      // Save updated work area
+      preferences.begin("plotter", false);
+      preferences.putFloat("minX", newMinX);
+      preferences.putFloat("maxX", newMaxX);
+      preferences.end();
+      
+      Serial.print("X-axis calibrated: ");
+      Serial.print(measuredSize, 2);
+      Serial.print("mm = ");
+      Serial.print(stepRange);
+      Serial.print(" steps → ");
+      Serial.print(newStepsPerMM, 3);
+      Serial.println(" steps/mm");
+    } else {
+      // Keep center position, adjust height to measured size
+      float center = (currentMinY + currentMaxY) / 2.0;
+      float newMinY = center - (measuredSize / 2.0);
+      float newMaxY = center + (measuredSize / 2.0);
+      motionController.setWorkArea(currentMinX, currentMaxX, newMinY, newMaxY);
+      
+      // Save updated work area
+      preferences.begin("plotter", false);
+      preferences.putFloat("minY", newMinY);
+      preferences.putFloat("maxY", newMaxY);
+      preferences.end();
+      
+      Serial.print("Y-axis calibrated: ");
+      Serial.print(measuredSize, 2);
+      Serial.print("mm = ");
+      Serial.print(stepRange);
+      Serial.print(" steps → ");
+      Serial.print(newStepsPerMM, 3);
+      Serial.println(" steps/mm");
+    }
+    
+    server.send(200, "text/plain", "ok");
+  } else {
+    server.send(400, "text/plain", "error: missing parameters");
+  }
+}
+
 void handleQueueStatus() {
   String json = "{";
   json += "\"size\":" + String(QUEUE_SIZE) + ",";
@@ -1500,6 +1654,7 @@ void setup() {
   server.on("/setworkarealimit", handleSetWorkAreaLimit);
   server.on("/setsteplimit", handleSetStepLimit);
   server.on("/finishcalibration", handleFinishCalibration);
+  server.on("/calibratefromphysical", handleCalibrateFromPhysical);
   server.on("/queuestatus", handleQueueStatus);
   server.on("/uploadgcode", HTTP_POST, handleUploadGcode);
   
