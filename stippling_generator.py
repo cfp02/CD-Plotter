@@ -1,455 +1,532 @@
 #!/usr/bin/env python3
 """
 Stippling Generator for ESP32 Plotter
-Converts images or text to stippling patterns and sends G-code to ESP32 via WiFi
+Converts images or text to stippling patterns and sends G-code to ESP32 via WiFi.
+Includes full preview, contrast/brightness controls, dot spacing, and dithering.
 """
 
 import requests
 import time
 import json
-from PIL import Image, ImageDraw, ImageFont
+from PIL import Image, ImageDraw, ImageFont, ImageOps, ImageTk
 import numpy as np
 import tkinter as tk
 from tkinter import filedialog, messagebox, ttk
 import threading
 import queue as thread_queue
 
+
+# =====================================================================
+# =======================  STIPPLING ENGINE  ==========================
+# =====================================================================
+
 class StipplingGenerator:
     def __init__(self, esp32_ip="192.168.1.100"):
         self.esp32_ip = esp32_ip
         self.base_url = f"http://{esp32_ip}"
         self.command_queue = thread_queue.Queue()
-        self.sending = False
-        
+
+    # ------------------------------------------------------------------
+    # Core networking helpers
+    # ------------------------------------------------------------------
+
     def get_queue_status(self):
-        """Get current queue status from ESP32"""
         try:
-            response = requests.get(f"{self.base_url}/queuestatus", timeout=2)
-            if response.status_code == 200:
-                return response.json()
-        except Exception as e:
-            print(f"Error getting queue status: {e}")
+            r = requests.get(f"{self.base_url}/queuestatus", timeout=2)
+            if r.status_code == 200:
+                return r.json()
+        except Exception:
+            pass
         return None
-    
+
     def send_command(self, cmd):
-        """Send single G-code command to ESP32"""
         try:
-            response = requests.get(f"{self.base_url}/gcode", params={"cmd": cmd}, timeout=2)
-            if response.status_code == 200:
-                result = response.text.strip()
-                if result == "ok":
-                    return True
-                elif result.startswith("error:"):
-                    print(f"Error: {result}")
-                    return False
-        except Exception as e:
-            print(f"Error sending command: {e}")
+            r = requests.get(f"{self.base_url}/gcode", params={"cmd": cmd}, timeout=2)
+            if r.status_code == 200:
+                t = r.text.strip()
+                return t == "ok"
+        except Exception:
+            pass
         return False
-    
+
     def send_batch(self, gcode_lines):
-        """Send batch of G-code commands"""
-        gcode_content = "\n".join(gcode_lines)
+        body = "\n".join(gcode_lines)
         try:
-            response = requests.post(
+            r = requests.post(
                 f"{self.base_url}/uploadgcode",
-                data=gcode_content,
+                data=body,
                 headers={"Content-Type": "text/plain"},
                 timeout=10
             )
-            if response.status_code == 200:
-                result = response.json()
-                return result
-        except Exception as e:
-            print(f"Error sending batch: {e}")
+            if r.status_code == 200:
+                return r.json()
+        except Exception:
+            pass
         return None
-    
+
     def wait_for_queue_space(self, required=1, max_wait=60):
-        """Wait for queue to have space"""
-        start_time = time.time()
-        while time.time() - start_time < max_wait:
+        start = time.time()
+        while time.time() - start < max_wait:
             status = self.get_queue_status()
             if status and status.get("free", 0) >= required:
                 return True
             time.sleep(0.5)
         return False
-    
-    def image_to_stippling(self, image_path, dot_density=0.5, invert=False, work_area=None):
-        """
-        Convert image to stippling pattern
-        dot_density: 0.0-1.0, higher = more dots
-        invert: True for dark dots on light background
-        work_area: (min_x, max_x, min_y, max_y) in mm
-        """
-        # Load and process image
-        img = Image.open(image_path).convert("L")  # Grayscale
-        img_width, img_height = img.size
-        
-        # Get work area from ESP32 if not provided
-        if work_area is None:
-            try:
-                response = requests.get(f"{self.base_url}/getworkarea", timeout=2)
-                if response.status_code == 200:
-                    area = response.json()
-                    work_area = (area["minX"], area["maxX"], area["minY"], area["maxY"])
-                else:
-                    work_area = (0, 200, 0, 200)  # Default
-            except:
-                work_area = (0, 200, 0, 200)  # Default
-        
-        min_x, max_x, min_y, max_y = work_area
-        width_mm = max_x - min_x
-        height_mm = max_y - min_y
-        
-        # Resize image to fit work area (maintain aspect ratio)
-        aspect_ratio = img_width / img_height
-        if width_mm / height_mm > aspect_ratio:
-            # Image is taller, fit to height
-            target_height = int(height_mm * 10)  # 10 pixels per mm
-            target_width = int(target_height * aspect_ratio)
-        else:
-            # Image is wider, fit to width
-            target_width = int(width_mm * 10)
-            target_height = int(target_width / aspect_ratio)
-        
-        img = img.resize((target_width, target_height), Image.Resampling.LANCZOS)
-        img_array = np.array(img)
-        
-        if invert:
-            img_array = 255 - img_array
-        
-        # Generate stippling pattern using Floyd-Steinberg dithering approach
-        # Higher values = more dots
-        threshold = int(255 * (1 - dot_density))
-        dots = []
-        
-        # Sample points based on image intensity
-        step = max(1, int(5 / dot_density))  # Adjust step size based on density
-        
-        for y in range(0, target_height, step):
-            for x in range(0, target_width, step):
-                # Get average intensity in region
-                region = img_array[y:min(y+step, target_height), x:min(x+step, target_width)]
-                avg_intensity = np.mean(region)
-                
-                # Convert to probability of dot
-                prob = (255 - avg_intensity) / 255.0
-                if np.random.random() < prob * dot_density:
-                    # Convert pixel coordinates to mm
-                    mm_x = min_x + (x / target_width) * width_mm
-                    mm_y = min_y + (y / target_height) * height_mm
-                    dots.append((mm_x, mm_y))
-        
-        return dots, work_area
-    
-    def text_to_stippling(self, text, font_size=20, work_area=None):
-        """Convert text to stippling pattern"""
-        # Get work area if not provided
-        if work_area is None:
-            try:
-                response = requests.get(f"{self.base_url}/getworkarea", timeout=2)
-                if response.status_code == 200:
-                    area = response.json()
-                    work_area = (area["minX"], area["maxX"], area["minY"], area["maxY"])
-                else:
-                    work_area = (0, 200, 0, 200)
-            except:
-                work_area = (0, 200, 0, 200)
-        
-        min_x, max_x, min_y, max_y = work_area
-        width_mm = max_x - min_x
-        height_mm = max_y - min_y
-        
-        # Create image with text
-        img = Image.new("L", (int(width_mm * 10), int(height_mm * 10)), 255)
-        draw = ImageDraw.Draw(img)
-        
+
+    # ------------------------------------------------------------------
+    # Work area resolver
+    # ------------------------------------------------------------------
+
+    def _get_work_area(self, work_area):
+        if work_area is not None:
+            return work_area
+
         try:
-            font = ImageFont.truetype("/usr/share/fonts/truetype/dejavu/DejaVuSans.ttf", font_size)
+            r = requests.get(f"{self.base_url}/getworkarea", timeout=2)
+            if r.status_code == 200:
+                a = r.json()
+                return (a["minX"], a["maxX"], a["minY"], a["maxY"])
+        except Exception:
+            pass
+
+        return (0, 200, 0, 200)
+
+    # ------------------------------------------------------------------
+    # Core stipple pipeline: PIL image → dots + preview image
+    # ------------------------------------------------------------------
+
+    def _stippling_from_pil(
+        self,
+        img,
+        dot_spacing_mm=1.0,
+        invert=False,
+        contrast=1.0,
+        brightness=1.0,
+        work_area=None,
+    ):
+        work_area = self._get_work_area(work_area)
+        min_x, max_x, min_y, max_y = work_area
+        width_mm = max_x - min_x
+        height_mm = max_y - min_y
+
+        dot_spacing_mm = max(dot_spacing_mm, 0.2)
+
+        img = img.convert("L")
+        img_w, img_h = img.size
+        aspect = img_w / img_h if img_h else 1.0
+
+        grid_w = max(1, int(width_mm / dot_spacing_mm))
+        grid_h = max(1, int(height_mm / dot_spacing_mm))
+
+        if grid_w / grid_h > aspect:
+            target_h = grid_h
+            target_w = int(target_h * aspect)
+        else:
+            target_w = grid_w
+            target_h = int(target_w / aspect)
+
+        target_w = max(1, target_w)
+        target_h = max(1, target_h)
+        img = img.resize((target_w, target_h), Image.Resampling.LANCZOS)
+
+        arr = np.array(img, dtype=np.float32)
+        arr = (arr - 128) * float(contrast) + 128
+        arr *= float(brightness)
+        arr = np.clip(arr, 0, 255).astype(np.uint8)
+
+        if invert:
+            arr = 255 - arr
+
+        proc = Image.fromarray(arr, mode="L")
+
+        bw = proc.convert("1", dither=Image.FLOYDSTEINBERG)
+        bw_arr = np.array(bw)
+
+        h, w = bw_arr.shape
+        dots = []
+        for y in range(h):
+            for x in range(w):
+                if bw_arr[y, x] == 0:
+                    mm_x = min_x + (x / w) * width_mm
+                    mm_y = min_y + (y / h) * height_mm
+                    dots.append((mm_x, mm_y))
+
+        return dots, work_area, bw
+
+    # ------------------------------------------------------------------
+    # Image file → stipple
+    # ------------------------------------------------------------------
+
+    def image_to_stippling(
+        self,
+        image_path,
+        dot_spacing_mm=1.0,
+        invert=False,
+        contrast=1.0,
+        brightness=1.0,
+        work_area=None,
+    ):
+        orig = Image.open(image_path).convert("RGB")
+        dots, area, bw = self._stippling_from_pil(
+            orig,
+            dot_spacing_mm=dot_spacing_mm,
+            invert=invert,
+            contrast=contrast,
+            brightness=brightness,
+            work_area=work_area,
+        )
+        return dots, area, bw, orig
+
+    # ------------------------------------------------------------------
+    # Text → stipple (render text to image first)
+    # ------------------------------------------------------------------
+
+    def text_to_stippling(
+        self,
+        text,
+        font_size=40,
+        dot_spacing_mm=1.0,
+        invert=False,
+        contrast=1.0,
+        brightness=1.0,
+        work_area=None,
+    ):
+        work_area = self._get_work_area(work_area)
+        min_x, max_x, min_y, max_y = work_area
+        width_mm = max_x - min_x
+        height_mm = max_y - min_y
+
+        img_w = max(1, int(width_mm * 10))
+        img_h = max(1, int(height_mm * 10))
+        img = Image.new("L", (img_w, img_h), 255)
+        draw = ImageDraw.Draw(img)
+
+        try:
+            font = ImageFont.truetype(
+                "/usr/share/fonts/truetype/dejavu/DejaVuSans.ttf",
+                font_size
+            )
         except:
             try:
                 font = ImageFont.truetype("arial.ttf", font_size)
             except:
                 font = ImageFont.load_default()
-        
-        # Get text bounding box
+
         bbox = draw.textbbox((0, 0), text, font=font)
-        text_width = bbox[2] - bbox[0]
-        text_height = bbox[3] - bbox[1]
-        
-        # Center text
-        x = (img.width - text_width) // 2
-        y = (img.height - text_height) // 2
-        
-        draw.text((x, y), text, fill=0, font=font)
-        
-        # Convert to stippling
-        return self.image_to_stippling_from_array(np.array(img), work_area)
-    
-    def image_to_stippling_from_array(self, img_array, work_area):
-        """Convert image array to stippling"""
-        min_x, max_x, min_y, max_y = work_area
-        width_mm = max_x - min_x
-        height_mm = max_y - min_y
-        height, width = img_array.shape
-        
-        dots = []
-        step = 3  # Sample every 3 pixels
-        
-        for y in range(0, height, step):
-            for x in range(0, width, step):
-                if img_array[y, x] < 128:  # Dark pixel
-                    mm_x = min_x + (x / width) * width_mm
-                    mm_y = min_y + (y / height) * height_mm
-                    dots.append((mm_x, mm_y))
-        
-        return dots, work_area
-    
-    def generate_gcode(self, dots, pen_up_between=True):
-        """Generate G-code commands from dot list"""
+        tw = bbox[2] - bbox[0]
+        th = bbox[3] - bbox[1]
+        x = (img_w - tw) // 2
+        y = (img_h - th) // 2
+        draw.text((x, y), text, font=font, fill=0)
+
+        dots, area, bw = self._stippling_from_pil(
+            img,
+            dot_spacing_mm=dot_spacing_mm,
+            invert=invert,
+            contrast=contrast,
+            brightness=brightness,
+            work_area=work_area,
+        )
+
+        return dots, area, bw, img.convert("RGB")
+
+    # ------------------------------------------------------------------
+    # Convert dots → G-code
+    # ------------------------------------------------------------------
+
+    def generate_gcode(self, dots):
         commands = []
-        commands.append("G0 X0 Y0")  # Start at home
-        commands.append("P0")  # Pen up
-        
+        commands.append("G0 X0 Y0")
+        commands.append("P0")  # pen up
+
         for x, y in dots:
-            if pen_up_between:
-                commands.append(f"G0 X{x:.2f} Y{y:.2f}")  # Rapid move
-            else:
-                commands.append(f"G1 X{x:.2f} Y{y:.2f}")  # Linear move
-            commands.append(f"D X{x:.2f} Y{y:.2f}")  # Dot command
-        
-        commands.append("G0 X0 Y0")  # Return home
-        commands.append("P0")  # Pen up
-        
+            commands.append(f"G0 X{x:.2f} Y{y:.2f}")
+            commands.append(f"D X{x:.2f} Y{y:.2f}")
+
+        commands.append("P0")
+        commands.append("G0 X0 Y0")
         return commands
-    
-    def send_pattern(self, dots, progress_callback=None):
-        """Send stippling pattern to ESP32"""
+
+    # ------------------------------------------------------------------
+    # Upload pattern to ESP32
+    # ------------------------------------------------------------------
+
+    def send_pattern(self, dots, progress=None):
         gcode = self.generate_gcode(dots)
-        total = len(gcode)
-        
-        # Try batch upload first
+
         result = self.send_batch(gcode)
         if result and result.get("failed", 0) == 0:
-            if progress_callback:
-                progress_callback(total, total)
+            if progress:
+                progress(len(gcode), len(gcode))
             return True
-        
-        # Fall back to streaming
+
         sent = 0
         for cmd in gcode:
-            if not self.wait_for_queue_space(required=1):
-                print("Queue full, waiting...")
+            if not self.wait_for_queue_space(1):
                 return False
-            
             if self.send_command(cmd):
                 sent += 1
-                if progress_callback:
-                    progress_callback(sent, total)
+                if progress:
+                    progress(sent, len(gcode))
             else:
-                print(f"Failed to send command: {cmd}")
                 return False
-            
-            # Small delay to prevent overwhelming
-            time.sleep(0.01)
-        
         return True
 
+
+# =====================================================================
+# ============================  GUI  ==================================
+# =====================================================================
 
 class StipplingGUI:
     def __init__(self):
         self.root = tk.Tk()
         self.root.title("ESP32 Plotter - Stippling Generator")
-        self.root.geometry("800x700")
-        
+        self.root.geometry("1000x750")
+
         self.generator = None
         self.dots = []
         self.work_area = None
-        
+
+        self.orig_img = None
+        self.stipple_img = None
+        self.orig_photo = None
+        self.stipple_photo = None
+
         self.setup_ui()
-        
+
+    # ------------------------------------------------------------------
+    # UI Layout
+    # ------------------------------------------------------------------
+
     def setup_ui(self):
-        # Connection settings
-        conn_frame = ttk.LabelFrame(self.root, text="ESP32 Connection", padding=10)
-        conn_frame.pack(fill=tk.X, padx=10, pady=5)
-        
-        ttk.Label(conn_frame, text="IP Address:").grid(row=0, column=0, sticky=tk.W)
-        self.ip_entry = ttk.Entry(conn_frame, width=20)
+        # Connection
+        conn = ttk.LabelFrame(self.root, text="ESP32 Connection", padding=10)
+        conn.pack(fill=tk.X, padx=10, pady=5)
+
+        ttk.Label(conn, text="IP Address:").grid(row=0, column=0, sticky=tk.W)
+        self.ip_entry = ttk.Entry(conn, width=20)
         self.ip_entry.insert(0, "192.168.1.100")
         self.ip_entry.grid(row=0, column=1, padx=5)
-        
-        ttk.Button(conn_frame, text="Connect", command=self.connect).grid(row=0, column=2, padx=5)
-        
-        self.status_label = ttk.Label(conn_frame, text="Not connected", foreground="red")
-        self.status_label.grid(row=1, column=0, columnspan=3, sticky=tk.W, pady=5)
-        
-        # Input selection
-        input_frame = ttk.LabelFrame(self.root, text="Input", padding=10)
-        input_frame.pack(fill=tk.X, padx=10, pady=5)
-        
-        ttk.Button(input_frame, text="Load Image", command=self.load_image).pack(side=tk.LEFT, padx=5)
-        ttk.Button(input_frame, text="Text Input", command=self.text_input).pack(side=tk.LEFT, padx=5)
-        
+        ttk.Button(conn, text="Connect", command=self.connect).grid(row=0, column=2, padx=5)
+
+        self.status_label = ttk.Label(conn, text="Not connected", foreground="red")
+        self.status_label.grid(row=1, column=0, columnspan=3, sticky=tk.W)
+
+        # Input buttons
+        inp = ttk.LabelFrame(self.root, text="Input", padding=10)
+        inp.pack(fill=tk.X, padx=10, pady=5)
+
+        ttk.Button(inp, text="Load Image", command=self.load_image).pack(side=tk.LEFT, padx=5)
+        ttk.Button(inp, text="Enter Text", command=self.text_input).pack(side=tk.LEFT, padx=5)
+
         # Settings
-        settings_frame = ttk.LabelFrame(self.root, text="Stippling Settings", padding=10)
-        settings_frame.pack(fill=tk.X, padx=10, pady=5)
-        
-        ttk.Label(settings_frame, text="Dot Density:").grid(row=0, column=0, sticky=tk.W)
-        self.density_var = tk.DoubleVar(value=0.5)
-        density_scale = ttk.Scale(settings_frame, from_=0.1, to=1.0, variable=self.density_var, orient=tk.HORIZONTAL)
-        density_scale.grid(row=0, column=1, sticky=tk.EW, padx=5)
-        self.density_label = ttk.Label(settings_frame, text="0.5")
-        self.density_label.grid(row=0, column=2, padx=5)
-        density_scale.configure(command=lambda v: self.density_label.config(text=f"{float(v):.2f}"))
-        
+        settings = ttk.LabelFrame(self.root, text="Stippling Settings", padding=10)
+        settings.pack(fill=tk.X, padx=10, pady=5)
+        settings.columnconfigure(1, weight=1)
+
+        # Dot spacing
+        ttk.Label(settings, text="Dot Spacing (mm):").grid(row=0, column=0, sticky=tk.W)
+        self.spacing_var = tk.DoubleVar(value=1.0)
+        spacing_scale = ttk.Scale(settings, from_=0.5, to=3.0, variable=self.spacing_var, orient=tk.HORIZONTAL)
+        spacing_scale.grid(row=0, column=1, sticky=tk.EW, padx=5)
+        self.spacing_label = ttk.Label(settings, text="1.00")
+        self.spacing_label.grid(row=0, column=2)
+        spacing_scale.configure(command=lambda v: self.spacing_label.config(text=f"{float(v):.2f}"))
+
+        # Contrast
+        ttk.Label(settings, text="Contrast:").grid(row=1, column=0, sticky=tk.W)
+        self.contrast_var = tk.DoubleVar(value=1.0)
+        contrast = ttk.Scale(settings, from_=0.5, to=2.0, variable=self.contrast_var, orient=tk.HORIZONTAL)
+        contrast.grid(row=1, column=1, sticky=tk.EW, padx=5)
+        self.contrast_label = ttk.Label(settings, text="1.00")
+        self.contrast_label.grid(row=1, column=2)
+        contrast.configure(command=lambda v: self.contrast_label.config(text=f"{float(v):.2f}"))
+
+        # Brightness
+        ttk.Label(settings, text="Brightness:").grid(row=2, column=0, sticky=tk.W)
+        self.brightness_var = tk.DoubleVar(value=1.0)
+        bright = ttk.Scale(settings, from_=0.5, to=1.5, variable=self.brightness_var, orient=tk.HORIZONTAL)
+        bright.grid(row=2, column=1, sticky=tk.EW, padx=5)
+        self.brightness_label = ttk.Label(settings, text="1.00")
+        self.brightness_label.grid(row=2, column=2)
+        bright.configure(command=lambda v: self.brightness_label.config(text=f"{float(v):.2f}"))
+
         self.invert_var = tk.BooleanVar()
-        ttk.Checkbutton(settings_frame, text="Invert (dark on light)", variable=self.invert_var).grid(row=1, column=0, columnspan=3, sticky=tk.W, pady=5)
-        
-        # Preview
-        preview_frame = ttk.LabelFrame(self.root, text="Preview", padding=10)
-        preview_frame.pack(fill=tk.BOTH, expand=True, padx=10, pady=5)
-        
-        self.preview_canvas = tk.Canvas(preview_frame, bg="white", width=400, height=300)
-        self.preview_canvas.pack(fill=tk.BOTH, expand=True)
-        
+        ttk.Checkbutton(settings, text="Invert (dark on light)", variable=self.invert_var).grid(row=3, column=0, columnspan=3, sticky=tk.W)
+
+        # Preview area
+        prev = ttk.LabelFrame(self.root, text="Preview", padding=10)
+        prev.pack(fill=tk.BOTH, expand=True, padx=10, pady=5)
+
+        self.orig_canvas = tk.Canvas(prev, bg="white")
+        self.orig_canvas.pack(side=tk.LEFT, fill=tk.BOTH, expand=True, padx=5)
+
+        self.stipple_canvas = tk.Canvas(prev, bg="white")
+        self.stipple_canvas.pack(side=tk.LEFT, fill=tk.BOTH, expand=True, padx=5)
+
         # Progress
         self.progress_var = tk.StringVar(value="Ready")
-        ttk.Label(self.root, textvariable=self.progress_var).pack(pady=5)
-        
-        self.progress_bar = ttk.Progressbar(self.root, mode='determinate')
+        ttk.Label(self.root, textvariable=self.progress_var).pack()
+        self.progress_bar = ttk.Progressbar(self.root, mode="determinate")
         self.progress_bar.pack(fill=tk.X, padx=10, pady=5)
-        
-        # Actions
-        action_frame = ttk.Frame(self.root)
-        action_frame.pack(fill=tk.X, padx=10, pady=5)
-        
-        ttk.Button(action_frame, text="Generate Pattern", command=self.generate_pattern).pack(side=tk.LEFT, padx=5)
-        ttk.Button(action_frame, text="Send to Plotter", command=self.send_to_plotter).pack(side=tk.LEFT, padx=5)
-        ttk.Button(action_frame, text="Home Plotter", command=self.home_plotter).pack(side=tk.LEFT, padx=5)
-        
+
+        # Buttons
+        actions = ttk.Frame(self.root)
+        actions.pack(fill=tk.X, padx=10, pady=5)
+
+        ttk.Button(actions, text="Generate Pattern", command=self.generate_pattern).pack(side=tk.LEFT, padx=5)
+        ttk.Button(actions, text="Send to Plotter", command=self.send_to_plotter).pack(side=tk.LEFT, padx=5)
+        ttk.Button(actions, text="Home Plotter", command=self.home_plotter).pack(side=tk.LEFT, padx=5)
+
+    # ------------------------------------------------------------------
+    # Interaction handlers
+    # ------------------------------------------------------------------
+
     def connect(self):
         ip = self.ip_entry.get()
         self.generator = StipplingGenerator(ip)
-        status = self.generator.get_queue_status()
-        if status:
-            self.status_label.config(text=f"Connected - Queue: {status['used']}/{status['size']}", foreground="green")
+        s = self.generator.get_queue_status()
+        if s:
+            self.status_label.config(text=f"Connected - Queue {s['used']}/{s['size']}", foreground="green")
         else:
             self.status_label.config(text="Connection failed", foreground="red")
-    
+
     def load_image(self):
-        filename = filedialog.askopenfilename(
-            title="Select Image",
-            filetypes=[("Image files", "*.png *.jpg *.jpeg *.bmp *.gif")]
-        )
-        if filename:
-            self.image_path = filename
-            self.progress_var.set(f"Image loaded: {filename}")
-    
+        path = filedialog.askopenfilename(title="Select Image",
+                                          filetypes=[("Images", "*.png *.jpg *.jpeg *.bmp *.gif")])
+        if path:
+            self.image_path = path
+            self.progress_var.set(f"Loaded: {path}")
+
     def text_input(self):
-        dialog = tk.Toplevel(self.root)
-        dialog.title("Enter Text")
-        dialog.geometry("300x100")
-        
-        ttk.Label(dialog, text="Text:").pack(pady=5)
-        text_entry = ttk.Entry(dialog, width=30)
-        text_entry.pack(pady=5)
-        text_entry.focus()
-        
+        win = tk.Toplevel(self.root)
+        win.title("Enter Text")
+        win.geometry("300x120")
+
+        ttk.Label(win, text="Text:").pack(pady=5)
+        entry = ttk.Entry(win, width=30)
+        entry.pack(pady=5)
+        entry.focus()
+
         def ok():
-            self.text = text_entry.get()
-            dialog.destroy()
+            self.text = entry.get()
+            win.destroy()
             self.progress_var.set(f"Text: {self.text}")
-        
-        ttk.Button(dialog, text="OK", command=ok).pack(pady=5)
-    
+
+        ttk.Button(win, text="OK", command=ok).pack(pady=5)
+
+    # ------------------------------------------------------------------
+    # Generate stipple pattern
+    # ------------------------------------------------------------------
+
     def generate_pattern(self):
         if not self.generator:
-            messagebox.showerror("Error", "Please connect to ESP32 first")
+            messagebox.showerror("Error", "Connect to ESP32 first.")
             return
-        
+
         try:
-            if hasattr(self, 'image_path'):
-                self.dots, self.work_area = self.generator.image_to_stippling(
-                    self.image_path,
-                    dot_density=self.density_var.get(),
-                    invert=self.invert_var.get()
+            spacing = self.spacing_var.get()
+            invert = self.invert_var.get()
+            contrast = self.contrast_var.get()
+            brightness = self.brightness_var.get()
+
+            if hasattr(self, "image_path"):
+                (self.dots, self.work_area, self.stipple_img, self.orig_img) = (
+                    self.generator.image_to_stippling(
+                        self.image_path,
+                        dot_spacing_mm=spacing,
+                        invert=invert,
+                        contrast=contrast,
+                        brightness=brightness,
+                    )
                 )
-            elif hasattr(self, 'text'):
-                self.dots, self.work_area = self.generator.text_to_stippling(
-                    self.text,
-                    font_size=40
+            elif hasattr(self, "text"):
+                (self.dots, self.work_area, self.stipple_img, self.orig_img) = (
+                    self.generator.text_to_stippling(
+                        self.text,
+                        font_size=40,
+                        dot_spacing_mm=spacing,
+                        invert=invert,
+                        contrast=contrast,
+                        brightness=brightness,
+                    )
                 )
             else:
-                messagebox.showerror("Error", "Please load an image or enter text first")
+                messagebox.showerror("Error", "Load an image or enter text first.")
                 return
-            
+
             self.progress_var.set(f"Generated {len(self.dots)} dots")
-            self.update_preview()
+            self.update_preview_images()
+
         except Exception as e:
-            messagebox.showerror("Error", f"Failed to generate pattern: {e}")
-    
-    def update_preview(self):
-        self.preview_canvas.delete("all")
-        if not self.dots:
-            return
-        
-        # Get canvas size
-        width = self.preview_canvas.winfo_width()
-        height = self.preview_canvas.winfo_height()
-        
-        if width <= 1 or height <= 1:
-            return
-        
-        # Scale dots to canvas
-        min_x = min(d[0] for d in self.dots)
-        max_x = max(d[0] for d in self.dots)
-        min_y = min(d[1] for d in self.dots)
-        max_y = max(d[1] for d in self.dots)
-        
-        scale_x = (width - 20) / (max_x - min_x) if max_x > min_x else 1
-        scale_y = (height - 20) / (max_y - min_y) if max_y > min_y else 1
-        scale = min(scale_x, scale_y)
-        
-        offset_x = 10 - min_x * scale
-        offset_y = 10 - min_y * scale
-        
-        # Draw dots
-        for x, y in self.dots:
-            canvas_x = x * scale + offset_x
-            canvas_y = y * scale + offset_y
-            self.preview_canvas.create_oval(canvas_x - 1, canvas_y - 1, canvas_x + 1, canvas_y + 1, fill="black")
-    
+            messagebox.showerror("Error", f"Generation failed:\n{e}")
+
+    # ------------------------------------------------------------------
+    # Preview render
+    # ------------------------------------------------------------------
+
+    def update_preview_images(self):
+        # Original
+        if self.orig_img is not None:
+            w = self.orig_canvas.winfo_width()
+            h = self.orig_canvas.winfo_height()
+            if w <= 1 or h <= 1:
+                self.root.after(100, self.update_preview_images)
+                return
+            img = ImageOps.contain(self.orig_img, (w - 10, h - 10))
+            self.orig_photo = ImageTk.PhotoImage(img)
+            self.orig_canvas.delete("all")
+            self.orig_canvas.create_image(w // 2, h // 2, image=self.orig_photo)
+
+        # Stippled
+        if self.stipple_img is not None:
+            w = self.stipple_canvas.winfo_width()
+            h = self.stipple_canvas.winfo_height()
+            if w <= 1 or h <= 1:
+                self.root.after(100, self.update_preview_images)
+                return
+            img = ImageOps.contain(self.stipple_img.convert("RGB"), (w - 10, h - 10))
+            self.stipple_photo = ImageTk.PhotoImage(img)
+            self.stipple_canvas.delete("all")
+            self.stipple_canvas.create_image(w // 2, h // 2, image=self.stipple_photo)
+
+    # ------------------------------------------------------------------
+    # Sending to plotter
+    # ------------------------------------------------------------------
+
     def send_to_plotter(self):
         if not self.dots:
-            messagebox.showerror("Error", "Please generate a pattern first")
+            messagebox.showerror("Error", "Generate a pattern first.")
             return
-        
+
         if not self.generator:
-            messagebox.showerror("Error", "Please connect to ESP32 first")
+            messagebox.showerror("Error", "Connect to ESP32 first.")
             return
-        
-        def progress(sent, total):
-            self.progress_var.set(f"Sending: {sent}/{total}")
-            self.progress_bar['maximum'] = total
-            self.progress_bar['value'] = sent
-        
-        def send_thread():
-            success = self.generator.send_pattern(self.dots, progress_callback=progress)
-            if success:
-                self.progress_var.set(f"Sent {len(self.dots)} dots successfully!")
+
+        def progress(done, total):
+            self.progress_var.set(f"Sending {done}/{total}")
+            self.progress_bar["maximum"] = total
+            self.progress_bar["value"] = done
+
+        def worker():
+            ok = self.generator.send_pattern(self.dots, progress)
+            if ok:
+                self.progress_var.set("Send complete!")
             else:
-                self.progress_var.set("Failed to send pattern")
-        
-        threading.Thread(target=send_thread, daemon=True).start()
-    
+                self.progress_var.set("Send failed.")
+
+        threading.Thread(target=worker, daemon=True).start()
+
     def home_plotter(self):
         if self.generator:
             self.generator.send_command("H")
-    
+
+    # ------------------------------------------------------------------
+
     def run(self):
         self.root.mainloop()
 
 
+# Run GUI
 if __name__ == "__main__":
-    app = StipplingGUI()
-    app.run()
-
+    StipplingGUI().run()
