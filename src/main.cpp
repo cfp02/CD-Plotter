@@ -43,6 +43,9 @@ WebServer server(80);
 #define MOTOR2_BIN2 5   // GPIO5 - Motor B Input 2 (CHANGE THIS - was GPIO35)
 #define MOTOR2_PWMB 22  // GPIO22 - Motor B PWM (power control)
 
+// Servo pin for pen control (future implementation)
+#define SERVO_PIN 18    // GPIO18 - Servo control pin for pen up/down
+
 // STBY pins are tied directly to 3.3V (not controlled by ESP32)
 
 // PWM settings for ESP32
@@ -71,7 +74,7 @@ float maxSpeed = 1000.0;          // Maximum speed in steps per second
 float acceleration = 1000.0;       // Acceleration in steps per second squared
 int motorPowerRunning = 250;      // Power when moving (0-255, ~98%)
 int motorPowerHolding = 120;      // Power when holding (0-255, 47%)
-#define STEPS_PER_REV 200         // Steps per revolution (typical for CD drive steppers)
+#define STEPS_PER_REV 20          // Steps per revolution (CD drive steppers)
 
 // AccelStepper setup - mode will be set dynamically
 // Motor 1
@@ -149,25 +152,79 @@ String getHTMLPage() {
   
   // Settings section
   html += "<div class=\"settings\">";
-  html += "<h2>Motor Settings</h2>";
+  html += "<h2>Plotter Configuration</h2>";
+  html += "<div class=\"settings-row\">";
+  html += "<label>Steps per mm (X):</label>";
+  html += "<input type=\"number\" id=\"stepsPerMM_X\" value=\"" + String(motionController.getStepsPerMM_X(), 2) + "\" min=\"0.1\" max=\"100\" step=\"0.1\">";
+  html += "<button onclick=\"setStepsPerMM('X')\">Set</button>";
+  html += "</div>";
+  html += "<div class=\"settings-row\">";
+  html += "<label>Steps per mm (Y):</label>";
+  html += "<input type=\"number\" id=\"stepsPerMM_Y\" value=\"" + String(motionController.getStepsPerMM_Y(), 2) + "\" min=\"0.1\" max=\"100\" step=\"0.1\">";
+  html += "<button onclick=\"setStepsPerMM('Y')\">Set</button>";
+  html += "</div>";
+  html += "<div class=\"settings-row\">";
+  html += "<label>Work Area - Min X (mm):</label>";
+  html += "<input type=\"number\" id=\"minX\" value=\"" + String(motionController.getMinX(), 1) + "\" min=\"-1000\" max=\"1000\" step=\"1\">";
+  html += "<button onclick=\"setWorkArea()\">Set</button>";
+  html += "</div>";
+  html += "<div class=\"settings-row\">";
+  html += "<label>Work Area - Max X (mm):</label>";
+  html += "<input type=\"number\" id=\"maxX\" value=\"" + String(motionController.getMaxX(), 1) + "\" min=\"-1000\" max=\"1000\" step=\"1\">";
+  html += "</div>";
+  html += "<div class=\"settings-row\">";
+  html += "<label>Work Area - Min Y (mm):</label>";
+  html += "<input type=\"number\" id=\"minY\" value=\"" + String(motionController.getMinY(), 1) + "\" min=\"-1000\" max=\"1000\" step=\"1\">";
+  html += "</div>";
+  html += "<div class=\"settings-row\">";
+  html += "<label>Work Area - Max Y (mm):</label>";
+  html += "<input type=\"number\" id=\"maxY\" value=\"" + String(motionController.getMaxY(), 1) + "\" min=\"-1000\" max=\"1000\" step=\"1\">";
+  html += "</div>";
+  html += "<div class=\"settings-row\" style=\"margin-top: 15px; padding-top: 15px; border-top: 1px solid #ccc;\">";
+  html += "<label>Set Limits at Current Position:</label>";
+  html += "<div style=\"display: inline-block; margin-left: 10px;\">";
+  html += "<button onclick=\"setLimit('X', 'min')\" style=\"padding: 5px 10px; margin: 2px;\">Set Min X</button>";
+  html += "<button onclick=\"setLimit('X', 'max')\" style=\"padding: 5px 10px; margin: 2px;\">Set Max X</button>";
+  html += "<button onclick=\"setLimit('Y', 'min')\" style=\"padding: 5px 10px; margin: 2px;\">Set Min Y</button>";
+  html += "<button onclick=\"setLimit('Y', 'max')\" style=\"padding: 5px 10px; margin: 2px;\">Set Max Y</button>";
+  html += "</div>";
+  html += "</div>";
+  html += "<div class=\"settings-row\" style=\"margin-top: 15px; padding-top: 15px; border-top: 1px solid #ccc;\">";
+  html += "<label>Axis Direction:</label>";
+  html += "<div style=\"display: inline-block; margin-left: 10px;\">";
+  html += "<span style=\"margin-right: 15px;\">X: <span id=\"xDir\" style=\"font-weight: bold; color: " + String(motionController.getInvertX() ? "#f44336" : "#4CAF50") + ";\">" + String(motionController.getInvertX() ? "← (inverted)" : "→ (normal)") + "</span></span>";
+  html += "<button onclick=\"flipDirection('X')\" style=\"padding: 5px 15px; margin-left: 5px;\">Flip X</button>";
+  html += "</div>";
+  html += "<div style=\"display: inline-block; margin-left: 20px;\">";
+  html += "<span style=\"margin-right: 15px;\">Y: <span id=\"yDir\" style=\"font-weight: bold; color: " + String(motionController.getInvertY() ? "#f44336" : "#4CAF50") + ";\">" + String(motionController.getInvertY() ? "↑ (inverted)" : "↓ (normal)") + "</span></span>";
+  html += "<button onclick=\"flipDirection('Y')\" style=\"padding: 5px 15px; margin-left: 5px;\">Flip Y</button>";
+  html += "</div>";
+  html += "</div>";
+  html += "<div style=\"margin: 10px 0; padding: 10px; background: #fff3cd; border-radius: 5px; font-size: 0.9em;\">";
+  html += "<strong>Direction Guide:</strong><br>";
+  html += "• X-axis: → = positive (right), ← = negative (left)<br>";
+  html += "• Y-axis: ↓ = positive (down), ↑ = negative (up)<br>";
+  html += "• Inverted means the motor direction is reversed";
+  html += "</div>";
+  html += "<h2 style=\"margin-top: 20px;\">Motor Settings</h2>";
   html += "<div class=\"settings-row\">";
   html += "<label>Max Speed (steps/sec):</label>";
-  html += "<input type=\"number\" id=\"maxSpeed\" value=\"1000\" min=\"1\" max=\"2000\" step=\"10\">";
+  html += "<input type=\"number\" id=\"maxSpeed\" value=\"" + String(maxSpeed, 0) + "\" min=\"1\" max=\"2000\" step=\"10\">";
   html += "<button onclick=\"setMaxSpeed()\">Set</button>";
   html += "</div>";
   html += "<div class=\"settings-row\">";
   html += "<label>Acceleration (steps/sec²):</label>";
-  html += "<input type=\"number\" id=\"acceleration\" value=\"1000\" min=\"1\" max=\"2000\" step=\"5\">";
+  html += "<input type=\"number\" id=\"acceleration\" value=\"" + String(acceleration, 0) + "\" min=\"1\" max=\"2000\" step=\"5\">";
   html += "<button onclick=\"setAcceleration()\">Set</button>";
   html += "</div>";
   html += "<div class=\"settings-row\">";
   html += "<label>Power When Running (0-255):</label>";
-  html += "<input type=\"number\" id=\"powerRunning\" value=\"250\" min=\"0\" max=\"255\" step=\"5\">";
+  html += "<input type=\"number\" id=\"powerRunning\" value=\"" + String(motorPowerRunning) + "\" min=\"0\" max=\"255\" step=\"5\">";
   html += "<button onclick=\"setPowerRunning()\">Set</button>";
   html += "</div>";
   html += "<div class=\"settings-row\">";
   html += "<label>Power When Holding (0-255):</label>";
-  html += "<input type=\"number\" id=\"powerHolding\" value=\"120\" min=\"0\" max=\"255\" step=\"5\">";
+  html += "<input type=\"number\" id=\"powerHolding\" value=\"" + String(motorPowerHolding) + "\" min=\"0\" max=\"255\" step=\"5\">";
   html += "<button onclick=\"setPowerHolding()\">Set</button>";
   html += "</div>";
   html += "<div class=\"settings-row\">";
@@ -238,6 +295,84 @@ String getHTMLPage() {
   html += "<button onclick=\"homeAll()\" style=\"background: #2196F3;\">Home All (Move to 0,0)</button>";
   html += "</div>";
   
+  // Calibration Wizard
+  html += "<div class=\"settings\" style=\"margin-top: 20px; background: #fff9c4;\">";
+  html += "<h2>🔧 Calibration Wizard</h2>";
+  html += "<div style=\"margin: 10px 0; padding: 10px; background: #fff; border-radius: 5px;\">";
+  html += "<p style=\"margin: 5px 0;\"><strong>Step 1:</strong> Assign motors to axes</p>";
+  html += "<div style=\"margin: 10px 0;\">";
+  html += "<label>Motor 1 is: </label>";
+  html += "<select id=\"motor1Axis\" style=\"padding: 5px; margin: 0 5px;\">";
+  html += "<option value=\"X\">X-Axis</option>";
+  html += "<option value=\"Y\">Y-Axis</option>";
+  html += "</select>";
+  html += "<span style=\"margin-left: 10px;\">Motor 2 is: </span>";
+  html += "<span id=\"motor2Axis\" style=\"font-weight: bold;\">Y-Axis</span>";
+  html += "</div>";
+  html += "<p style=\"margin: 5px 0;\"><strong>Step 2:</strong> Find limits for each axis</p>";
+  html += "<div style=\"margin: 10px 0;\">";
+  html += "<label>Calibrating: </label>";
+  html += "<select id=\"calAxis\" style=\"padding: 5px; margin: 0 5px;\">";
+  html += "<option value=\"X\">X-Axis</option>";
+  html += "<option value=\"Y\">Y-Axis</option>";
+  html += "</select>";
+  html += "<button onclick=\"startCalibration()\" style=\"padding: 5px 15px; margin-left: 10px; background: #4CAF50; color: white;\">Start</button>";
+  html += "</div>";
+  html += "<div id=\"calibrationControls\" style=\"display: none; margin: 15px 0; padding: 15px; background: #e8f5e9; border-radius: 5px;\">";
+  html += "<div style=\"margin: 10px 0;\">";
+  html += "<strong>Current Step Position: <span id=\"calStepPos\">0</span></strong>";
+  html += "</div>";
+  html += "<div style=\"margin: 10px 0;\">";
+  html += "<button onclick=\"calJog(-1000)\" style=\"padding: 8px 15px; margin: 2px; background: #f44336;\">-1000</button>";
+  html += "<button onclick=\"calJog(-100)\" style=\"padding: 8px 15px; margin: 2px; background: #ff9800;\">-100</button>";
+  html += "<button onclick=\"calJog(-10)\" style=\"padding: 8px 15px; margin: 2px; background: #ffc107;\">-10</button>";
+  html += "<button onclick=\"calJog(-1)\" style=\"padding: 8px 15px; margin: 2px; background: #ffeb3b;\">-1</button>";
+  html += "<button onclick=\"calStop()\" style=\"padding: 8px 15px; margin: 2px; background: #666; color: white;\">STOP</button>";
+  html += "<button onclick=\"calJog(1)\" style=\"padding: 8px 15px; margin: 2px; background: #4CAF50;\">+1</button>";
+  html += "<button onclick=\"calJog(10)\" style=\"padding: 8px 15px; margin: 2px; background: #8BC34A;\">+10</button>";
+  html += "<button onclick=\"calJog(100)\" style=\"padding: 8px 15px; margin: 2px; background: #9CCC65;\">+100</button>";
+  html += "<button onclick=\"calJog(1000)\" style=\"padding: 8px 15px; margin: 2px; background: #AED581;\">+1000</button>";
+  html += "</div>";
+  html += "<div style=\"margin: 15px 0; padding: 10px; background: #fff; border: 2px solid #4CAF50; border-radius: 5px;\">";
+  html += "<p style=\"margin: 5px 0;\"><strong>When you reach a limit:</strong></p>";
+  html += "<div style=\"margin: 10px 0;\">";
+  html += "<label>Direction you moved: </label>";
+  html += "<select id=\"limitDirection\" style=\"padding: 5px; margin: 0 5px;\">";
+  html += "<option value=\"positive\">Positive (+)</option>";
+  html += "<option value=\"negative\">Negative (-)</option>";
+  html += "</select>";
+  html += "<button onclick=\"setLimitFromCal()\" style=\"padding: 5px 15px; margin-left: 10px; background: #2196F3; color: white;\">Set This Limit</button>";
+  html += "</div>";
+  html += "<div style=\"margin: 10px 0;\">";
+  html += "<strong>Current Limits:</strong><br>";
+  html += "Min: <span id=\"calMin\">Not set</span> | Max: <span id=\"calMax\">Not set</span>";
+  html += "</div>";
+  html += "</div>";
+  html += "<button onclick=\"finishCalibration()\" style=\"padding: 8px 20px; background: #4CAF50; color: white; margin-top: 10px;\">Finish Calibration</button>";
+  html += "</div>";
+  html += "</div>";
+  html += "</div>";
+  
+  // 2D Interactive Canvas
+  html += "<div class=\"settings\" style=\"margin-top: 20px;\">";
+  html += "<h2>2D Plotter Board</h2>";
+  html += "<div style=\"text-align: center; margin: 10px 0;\">";
+  html += "<canvas id=\"plotterCanvas\" style=\"border: 2px solid #333; background: #f9f9f9; cursor: crosshair; max-width: 100%;\"></canvas>";
+  html += "</div>";
+  html += "<div style=\"margin: 10px 0; text-align: center;\">";
+  html += "<label>Click Mode: </label>";
+  html += "<select id=\"clickMode\" style=\"padding: 5px; margin: 0 10px;\">";
+  html += "<option value=\"rapid\">Rapid Move (G0)</option>";
+  html += "<option value=\"linear\">Linear Move (G1)</option>";
+  html += "<option value=\"dot\">Dot (D)</option>";
+  html += "</select>";
+  html += "<button onclick=\"homePlotter()\" style=\"background: #2196F3; margin-left: 10px;\">Move to Home</button>";
+  html += "<button onclick=\"setHomePosition()\" style=\"background: #FF9800; margin-left: 10px;\">Set Home Here</button>";
+  html += "<button onclick=\"clearCanvas()\" style=\"margin-left: 10px;\">Clear Path</button>";
+  html += "</div>";
+  html += "<div class=\"status\" id=\"canvasStatus\" style=\"text-align: center;\">Click on the canvas to move the plotter</div>";
+  html += "</div>";
+  
   // G-code command interface
   html += "<div class=\"settings\" style=\"margin-top: 20px;\">";
   html += "<h2>G-code Commands</h2>";
@@ -302,6 +437,267 @@ String getHTMLPage() {
   html += "const mode = document.getElementById('stepMode').value;";
   html += "fetch('/setstepmode?mode=' + mode).then(() => alert('Step mode set to ' + mode + '. Please restart ESP32 for changes to take effect.'));";
   html += "}";
+  html += "function setStepsPerMM(axis) {";
+  html += "const value = parseFloat(document.getElementById('stepsPerMM_' + axis).value);";
+  html += "fetch('/setstepspermm?axis=' + axis + '&value=' + value).then(() => {";
+  html += "alert('Steps per mm (' + axis + ') set to ' + value);";
+  html += "updateCanvas();";
+  html += "});";
+  html += "}";
+  html += "function setWorkArea() {";
+  html += "const minX = parseFloat(document.getElementById('minX').value);";
+  html += "const maxX = parseFloat(document.getElementById('maxX').value);";
+  html += "const minY = parseFloat(document.getElementById('minY').value);";
+  html += "const maxY = parseFloat(document.getElementById('maxY').value);";
+  html += "fetch('/setworkarea?minX=' + minX + '&maxX=' + maxX + '&minY=' + minY + '&maxY=' + maxY).then(() => {";
+  html += "alert('Work area updated');";
+  html += "updateCanvas();";
+  html += "location.reload();";
+  html += "});";
+  html += "}";
+  html += "function setLimit(axis, limit) {";
+  html += "fetch('/getposition').then(r => r.json()).then(pos => {";
+  html += "const value = limit === 'min' ? (axis === 'X' ? pos.x : pos.y) : (axis === 'X' ? pos.x : pos.y);";
+  html += "fetch('/setworkarealimit?axis=' + axis + '&limit=' + limit + '&value=' + value.toFixed(2)).then(() => {";
+  html += "alert(axis + ' ' + limit + ' set to ' + value.toFixed(2) + ' mm');";
+  html += "location.reload();";
+  html += "});";
+  html += "});";
+  html += "}";
+  html += "let calibrating = false;";
+  html += "let calAxis = 'X';";
+  html += "let calMotor = 1;";
+  html += "let calMinStep = null;";
+  html += "let calMaxStep = null;";
+  html += "document.getElementById('motor1Axis').addEventListener('change', function() {";
+  html += "const m1 = this.value;";
+  html += "document.getElementById('motor2Axis').textContent = (m1 === 'X' ? 'Y' : 'X') + '-Axis';";
+  html += "});";
+  html += "document.getElementById('calAxis').addEventListener('change', function() {";
+  html += "calAxis = this.value;";
+  html += "const m1Axis = document.getElementById('motor1Axis').value;";
+  html += "calMotor = (calAxis === m1Axis) ? 1 : 2;";
+  html += "calMinStep = null;";
+  html += "calMaxStep = null;";
+  html += "updateCalLimits();";
+  html += "});";
+  html += "function startCalibration() {";
+  html += "calAxis = document.getElementById('calAxis').value;";
+  html += "const m1Axis = document.getElementById('motor1Axis').value;";
+  html += "calMotor = (calAxis === m1Axis) ? 1 : 2;";
+  html += "calibrating = true;";
+  html += "calMinStep = null;";
+  html += "calMaxStep = null;";
+  html += "document.getElementById('calibrationControls').style.display = 'block';";
+  html += "updateCalPosition();";
+  html += "updateCalLimits();";
+  html += "setInterval(updateCalPosition, 200);";
+  html += "}";
+  html += "function updateCalPosition() {";
+  html += "if (!calibrating) return;";
+  html += "fetch('/status').then(r => r.json()).then(data => {";
+  html += "const pos = calMotor === 1 ? data.motor1.position : data.motor2.position;";
+  html += "document.getElementById('calStepPos').textContent = pos;";
+  html += "});";
+  html += "}";
+  html += "function calJog(steps) {";
+  html += "fetch('/moverel?motor=' + calMotor + '&steps=' + steps);";
+  html += "}";
+  html += "function calStop() {";
+  html += "fetch('/stop?motor=' + calMotor);";
+  html += "}";
+  html += "function setLimitFromCal() {";
+  html += "const stepPos = parseInt(document.getElementById('calStepPos').textContent);";
+  html += "const direction = document.getElementById('limitDirection').value;";
+  html += "if (direction === 'positive') {";
+  html += "calMaxStep = stepPos;";
+  html += "} else {";
+  html += "calMinStep = stepPos;";
+  html += "}";
+  html += "updateCalLimits();";
+  html += "fetch('/setsteplimit?axis=' + calAxis + '&limit=' + direction + '&steps=' + stepPos).then(() => {";
+  html += "alert('Limit set: ' + direction + ' = ' + stepPos + ' steps');";
+  html += "});";
+  html += "}";
+  html += "function updateCalLimits() {";
+  html += "const minText = calMinStep !== null ? calMinStep + ' steps' : 'Not set';";
+  html += "const maxText = calMaxStep !== null ? calMaxStep + ' steps' : 'Not set';";
+  html += "document.getElementById('calMin').textContent = minText;";
+  html += "document.getElementById('calMax').textContent = maxText;";
+  html += "}";
+  html += "function finishCalibration() {";
+  html += "if (calMinStep === null || calMaxStep === null) {";
+  html += "alert('Please set both min and max limits first');";
+  html += "return;";
+  html += "}";
+  html += "const m1Axis = document.getElementById('motor1Axis').value;";
+  html += "fetch('/finishcalibration?motor1Axis=' + m1Axis + '&xMin=' + (calAxis === 'X' ? calMinStep : '') + '&xMax=' + (calAxis === 'X' ? calMaxStep : '') + '&yMin=' + (calAxis === 'Y' ? calMinStep : '') + '&yMax=' + (calAxis === 'Y' ? calMaxStep : '')).then(() => {";
+  html += "alert('Calibration complete! You can now set physical dimensions (steps/mm)');";
+  html += "location.reload();";
+  html += "});";
+  html += "}";
+  html += "function flipDirection(axis) {";
+  html += "fetch('/flipdirection?axis=' + axis).then(() => {";
+  html += "fetch('/getdirection').then(r => r.json()).then(data => {";
+  html += "const xEl = document.getElementById('xDir');";
+  html += "const yEl = document.getElementById('yDir');";
+  html += "xEl.textContent = data.invertX ? '← (inverted)' : '→ (normal)';";
+  html += "xEl.style.color = data.invertX ? '#f44336' : '#4CAF50';";
+  html += "yEl.textContent = data.invertY ? '↑ (inverted)' : '↓ (normal)';";
+  html += "yEl.style.color = data.invertY ? '#f44336' : '#4CAF50';";
+  html += "alert('Direction flipped for ' + axis + ' axis');";
+  html += "});";
+  html += "});";
+  html += "}";
+  html += "let canvas, ctx, canvasWidth = 600, canvasHeight = 600;";
+  html += "let pathPoints = [];";
+  html += "function initCanvas() {";
+  html += "canvas = document.getElementById('plotterCanvas');";
+  html += "ctx = canvas.getContext('2d');";
+  html += "canvasWidth = Math.min(600, window.innerWidth - 60);";
+  html += "canvasHeight = canvasWidth;";
+  html += "canvas.width = canvasWidth;";
+  html += "canvas.height = canvasHeight;";
+  html += "updateCanvas();";
+  html += "canvas.addEventListener('click', function(e) {";
+  html += "const rect = canvas.getBoundingClientRect();";
+  html += "const x = e.clientX - rect.left;";
+  html += "const y = e.clientY - rect.top;";
+  html += "const mode = document.getElementById('clickMode').value;";
+  html += "fetch('/getworkarea').then(r => r.json()).then(data => {";
+  html += "const mmX = data.minX + (x / canvasWidth) * (data.maxX - data.minX);";
+  html += "const mmY = data.maxY - (y / canvasHeight) * (data.maxY - data.minY);";
+  html += "let cmd = '';";
+  html += "if (mode === 'rapid') cmd = 'G0 X' + mmX.toFixed(2) + ' Y' + mmY.toFixed(2);";
+  html += "else if (mode === 'linear') cmd = 'G1 X' + mmX.toFixed(2) + ' Y' + mmY.toFixed(2);";
+  html += "else if (mode === 'dot') cmd = 'D X' + mmX.toFixed(2) + ' Y' + mmY.toFixed(2);";
+  html += "document.getElementById('gcodeCommand').value = cmd;";
+  html += "sendGcode();";
+  html += "pathPoints.push({x: x, y: y});";
+  html += "updateCanvas();";
+  html += "});";
+  html += "});";
+  html += "}";
+  html += "function updateCanvas() {";
+  html += "if (!canvas || !ctx) return;";
+  html += "ctx.clearRect(0, 0, canvasWidth, canvasHeight);";
+  html += "fetch('/getworkarea').then(r => r.json()).then(data => {";
+  html += "ctx.strokeStyle = '#333';";
+  html += "ctx.lineWidth = 1;";
+  html += "ctx.strokeRect(0, 0, canvasWidth, canvasHeight);";
+  html += "ctx.font = 'bold 16px Arial';";
+  html += "ctx.fillStyle = '#1976D2';";
+  html += "ctx.strokeStyle = '#fff';";
+  html += "ctx.lineWidth = 3;";
+  html += "ctx.textAlign = 'center';";
+  html += "ctx.textBaseline = 'middle';";
+  html += "ctx.strokeText('X+ (right)', canvasWidth - 50, 25);";
+  html += "ctx.fillText('X+ (right)', canvasWidth - 50, 25);";
+  html += "ctx.strokeText('X- (left)', 50, 25);";
+  html += "ctx.fillText('X- (left)', 50, 25);";
+  html += "ctx.save();";
+  html += "ctx.translate(25, canvasHeight - 25);";
+  html += "ctx.rotate(-Math.PI / 2);";
+  html += "ctx.strokeText('Y+ (down)', 0, 0);";
+  html += "ctx.fillText('Y+ (down)', 0, 0);";
+  html += "ctx.restore();";
+  html += "ctx.save();";
+  html += "ctx.translate(canvasWidth - 25, 25);";
+  html += "ctx.rotate(-Math.PI / 2);";
+  html += "ctx.strokeText('Y- (up)', 0, 0);";
+  html += "ctx.fillText('Y- (up)', 0, 0);";
+  html += "ctx.restore();";
+  html += "ctx.textAlign = 'left';";
+  html += "ctx.textBaseline = 'top';";
+  html += "ctx.lineWidth = 1;";
+  html += "ctx.font = '10px Arial';";
+  html += "ctx.fillStyle = '#666';";
+  html += "ctx.textAlign = 'left';";
+  html += "ctx.textBaseline = 'top';";
+  html += "ctx.fillText('Min X: ' + data.minX.toFixed(1) + 'mm', 5, canvasHeight - 50);";
+  html += "ctx.fillText('Max X: ' + data.maxX.toFixed(1) + 'mm', 5, canvasHeight - 35);";
+  html += "ctx.fillText('Min Y: ' + data.minY.toFixed(1) + 'mm', 5, canvasHeight - 20);";
+  html += "ctx.fillText('Max Y: ' + data.maxY.toFixed(1) + 'mm', 5, canvasHeight - 5);";
+  html += "ctx.textAlign = 'right';";
+  html += "ctx.fillText('Width: ' + (data.maxX - data.minX).toFixed(1) + 'mm', canvasWidth - 5, canvasHeight - 50);";
+  html += "ctx.fillText('Height: ' + (data.maxY - data.minY).toFixed(1) + 'mm', canvasWidth - 5, canvasHeight - 35);";
+  html += "ctx.strokeStyle = '#ccc';";
+  html += "ctx.setLineDash([5, 5]);";
+  html += "for (let i = 1; i < 10; i++) {";
+  html += "const x = (i / 10) * canvasWidth;";
+  html += "const y = (i / 10) * canvasHeight;";
+  html += "ctx.beginPath();";
+  html += "ctx.moveTo(x, 0);";
+  html += "ctx.lineTo(x, canvasHeight);";
+  html += "ctx.stroke();";
+  html += "ctx.beginPath();";
+  html += "ctx.moveTo(0, y);";
+  html += "ctx.lineTo(canvasWidth, y);";
+  html += "ctx.stroke();";
+  html += "}";
+  html += "ctx.setLineDash([]);";
+  html += "fetch('/getposition').then(r => r.json()).then(pos => {";
+  html += "const px = ((pos.x - data.minX) / (data.maxX - data.minX)) * canvasWidth;";
+  html += "const py = ((data.maxY - pos.y) / (data.maxY - data.minY)) * canvasHeight;";
+  html += "ctx.fillStyle = '#4CAF50';";
+  html += "ctx.beginPath();";
+  html += "ctx.arc(px, py, 8, 0, 2 * Math.PI);";
+  html += "ctx.fill();";
+  html += "ctx.strokeStyle = '#2E7D32';";
+  html += "ctx.lineWidth = 2;";
+  html += "ctx.stroke();";
+  html += "});";
+  html += "ctx.strokeStyle = '#2196F3';";
+  html += "ctx.lineWidth = 2;";
+  html += "if (pathPoints.length > 1) {";
+  html += "ctx.beginPath();";
+  html += "ctx.moveTo(pathPoints[0].x, pathPoints[0].y);";
+  html += "for (let i = 1; i < pathPoints.length; i++) {";
+  html += "ctx.lineTo(pathPoints[i].x, pathPoints[i].y);";
+  html += "}";
+  html += "ctx.stroke();";
+  html += "}";
+  html += "pathPoints.forEach((p, i) => {";
+  html += "ctx.fillStyle = i === 0 ? '#f44336' : '#2196F3';";
+  html += "ctx.beginPath();";
+  html += "ctx.arc(p.x, p.y, 4, 0, 2 * Math.PI);";
+  html += "ctx.fill();";
+  html += "});";
+  html += "});";
+  html += "}";
+  html += "function clearCanvas() {";
+  html += "pathPoints = [];";
+  html += "updateCanvas();";
+  html += "}";
+  html += "function homePlotter() {";
+  html += "document.getElementById('canvasStatus').textContent = 'Moving to home position...';";
+  html += "fetch('/gcode?cmd=H')";
+  html += ".then(response => response.text())";
+  html += ".then(data => {";
+  html += "if (data === 'ok' || data === 'queued') {";
+  html += "document.getElementById('canvasStatus').textContent = 'Moving to home...';";
+  html += "setTimeout(() => { updateCanvas(); document.getElementById('canvasStatus').textContent = 'At home position'; }, 500);";
+  html += "} else {";
+  html += "document.getElementById('canvasStatus').textContent = 'Error: ' + data;";
+  html += "}";
+  html += "});";
+  html += "}";
+  html += "function setHomePosition() {";
+  html += "document.getElementById('canvasStatus').textContent = 'Setting current position as home...';";
+  html += "fetch('/sethomeposition')";
+  html += ".then(response => response.text())";
+  html += ".then(data => {";
+  html += "if (data === 'ok') {";
+  html += "document.getElementById('canvasStatus').textContent = 'Home position set! Work area updated.';";
+  html += "setTimeout(() => {";
+  html += "location.reload();";
+  html += "}, 1000);";
+  html += "} else {";
+  html += "document.getElementById('canvasStatus').textContent = 'Error: ' + data;";
+  html += "}";
+  html += "});";
+  html += "}";
+  html += "setInterval(updateCanvas, 1000);";
   html += "function sendGcode() {";
   html += "const cmd = document.getElementById('gcodeCommand').value.trim();";
   html += "if (!cmd) return;";
@@ -343,6 +739,7 @@ String getHTMLPage() {
   html += "document.getElementById('status2').textContent = 'Position: ' + data.motor2.position + ' | Target: ' + data.motor2.target + ' | Speed: ' + data.motor2.speed.toFixed(1) + ' steps/sec';";
   html += "});";
   html += "}, 500);";
+  html += "window.onload = function() { initCanvas(); };";
   html += "</script></body></html>";
   
   return html;
@@ -478,6 +875,12 @@ void handleSetSpeed() {
     if (maxSpeed < 1.0) maxSpeed = 1.0;
     if (maxSpeed > 2000.0) maxSpeed = 2000.0;
     updateMotorSettings();
+    
+    // Save to preferences
+    preferences.begin("motor", false);
+    preferences.putFloat("maxSpeed", maxSpeed);
+    preferences.end();
+    
     Serial.print("Max speed set to: ");
     Serial.println(maxSpeed);
     server.send(200, "text/plain", "OK");
@@ -492,6 +895,12 @@ void handleSetAcceleration() {
     if (acceleration < 1.0) acceleration = 1.0;
     if (acceleration > 2000.0) acceleration = 2000.0;
     updateMotorSettings();
+    
+    // Save to preferences
+    preferences.begin("motor", false);
+    preferences.putFloat("acceleration", acceleration);
+    preferences.end();
+    
     Serial.print("Acceleration set to: ");
     Serial.println(acceleration);
     server.send(200, "text/plain", "OK");
@@ -507,12 +916,15 @@ void handleSetPower() {
     if (power > 255) power = 255;
     
     String type = server.arg("type");
+    preferences.begin("motor", false);
     if (type == "running") {
       motorPowerRunning = power;
+      preferences.putInt("powerRunning", motorPowerRunning);
       Serial.print("Running power set to: ");
       Serial.println(motorPowerRunning);
     } else if (type == "holding") {
       motorPowerHolding = power;
+      preferences.putInt("powerHolding", motorPowerHolding);
       Serial.print("Holding power set to: ");
       Serial.println(motorPowerHolding);
       // If motors are currently stopped, update power immediately
@@ -520,6 +932,7 @@ void handleSetPower() {
         setMotorPower(motorPowerHolding);
       }
     }
+    preferences.end();
     server.send(200, "text/plain", "OK");
   } else {
     server.send(400, "text/plain", "Bad Request");
@@ -585,12 +998,368 @@ void handleGcode() {
     if (commandQueue.enqueue(parsedCmd)) {
       Serial.print("G-code queued via web: ");
       Serial.println(cmd);
-      server.send(200, "text/plain", "queued");
+      server.send(200, "text/plain", "ok");
     } else {
       server.send(200, "text/plain", "error: queue full");
     }
   } else {
     server.send(400, "text/plain", "error: missing command");
+  }
+}
+
+void handleSetStepsPerMM() {
+  if (server.hasArg("axis") && server.hasArg("value")) {
+    String axis = server.arg("axis");
+    float value = server.arg("value").toFloat();
+    
+    if (value <= 0 || value > 100) {
+      server.send(400, "text/plain", "error: invalid value (0.1-100)");
+      return;
+    }
+    
+    float x = motionController.getStepsPerMM_X();
+    float y = motionController.getStepsPerMM_Y();
+    
+    if (axis == "X" || axis == "x") {
+      x = value;
+    } else if (axis == "Y" || axis == "y") {
+      y = value;
+    } else {
+      server.send(400, "text/plain", "error: invalid axis");
+      return;
+    }
+    
+    motionController.setStepsPerMM(x, y);
+    
+    // Save to preferences
+    preferences.begin("plotter", false);
+    preferences.putFloat("stepsPerMM_X", x);
+    preferences.putFloat("stepsPerMM_Y", y);
+    preferences.end();
+    
+    Serial.print("Steps per mm updated: X=");
+    Serial.print(x, 2);
+    Serial.print(" Y=");
+    Serial.println(y, 2);
+    
+    server.send(200, "text/plain", "ok");
+  } else {
+    server.send(400, "text/plain", "error: missing parameters");
+  }
+}
+
+void handleSetWorkArea() {
+  if (server.hasArg("minX") && server.hasArg("maxX") && server.hasArg("minY") && server.hasArg("maxY")) {
+    float minX = server.arg("minX").toFloat();
+    float maxX = server.arg("maxX").toFloat();
+    float minY = server.arg("minY").toFloat();
+    float maxY = server.arg("maxY").toFloat();
+    
+    if (minX >= maxX || minY >= maxY) {
+      server.send(400, "text/plain", "error: invalid range");
+      return;
+    }
+    
+    motionController.setWorkArea(minX, maxX, minY, maxY);
+    
+    // Save to preferences
+    preferences.begin("plotter", false);
+    preferences.putFloat("minX", minX);
+    preferences.putFloat("maxX", maxX);
+    preferences.putFloat("minY", minY);
+    preferences.putFloat("maxY", maxY);
+    preferences.end();
+    
+    Serial.print("Work area updated: X[");
+    Serial.print(minX, 1);
+    Serial.print(",");
+    Serial.print(maxX, 1);
+    Serial.print("] Y[");
+    Serial.print(minY, 1);
+    Serial.print(",");
+    Serial.print(maxY, 1);
+    Serial.println("]");
+    
+    server.send(200, "text/plain", "ok");
+  } else {
+    server.send(400, "text/plain", "error: missing parameters");
+  }
+}
+
+void handleGetWorkArea() {
+  String json = "{";
+  json += "\"minX\":" + String(motionController.getMinX(), 2) + ",";
+  json += "\"maxX\":" + String(motionController.getMaxX(), 2) + ",";
+  json += "\"minY\":" + String(motionController.getMinY(), 2) + ",";
+  json += "\"maxY\":" + String(motionController.getMaxY(), 2);
+  json += "}";
+  
+  server.send(200, "application/json", json);
+}
+
+void handleGetPosition() {
+  String json = "{";
+  json += "\"x\":" + String(motionController.getX_mm(), 2) + ",";
+  json += "\"y\":" + String(motionController.getY_mm(), 2);
+  json += "}";
+  
+  server.send(200, "application/json", json);
+}
+
+void handleFlipDirection() {
+  if (server.hasArg("axis")) {
+    String axis = server.arg("axis");
+    bool newState;
+    
+    if (axis == "X" || axis == "x") {
+      newState = !motionController.getInvertX();
+      motionController.setInvertX(newState);
+    } else if (axis == "Y" || axis == "y") {
+      newState = !motionController.getInvertY();
+      motionController.setInvertY(newState);
+    } else {
+      server.send(400, "text/plain", "error: invalid axis");
+      return;
+    }
+    
+    // Save to preferences
+    preferences.begin("plotter", false);
+    if (axis == "X" || axis == "x") {
+      preferences.putBool("invertX", newState);
+    } else {
+      preferences.putBool("invertY", newState);
+    }
+    preferences.end();
+    
+    Serial.print("Direction flipped for ");
+    Serial.print(axis);
+    Serial.print(" axis: ");
+    Serial.println(newState ? "inverted" : "normal");
+    
+    server.send(200, "text/plain", "ok");
+  } else {
+    server.send(400, "text/plain", "error: missing axis parameter");
+  }
+}
+
+void handleGetDirection() {
+  String json = "{";
+  json += "\"invertX\":" + String(motionController.getInvertX() ? "true" : "false") + ",";
+  json += "\"invertY\":" + String(motionController.getInvertY() ? "true" : "false");
+  json += "}";
+  
+  server.send(200, "application/json", json);
+}
+
+void handleSetHomePosition() {
+  // Register current position as the new home (0, 0)
+  // This ONLY sets the coordinate origin - does NOT change work area limits
+  motionController.setCurrentPositionAsHome();
+  
+  // Work area limits remain unchanged - they are set during calibration
+  // Just save that home has been set (for reference)
+  Serial.print("Home position set at current location (0,0). Work area unchanged: X[");
+  Serial.print(motionController.getMinX(), 1);
+  Serial.print(",");
+  Serial.print(motionController.getMaxX(), 1);
+  Serial.print("] Y[");
+  Serial.print(motionController.getMinY(), 1);
+  Serial.print(",");
+  Serial.print(motionController.getMaxY(), 1);
+  Serial.println("]");
+  
+  server.send(200, "text/plain", "ok");
+}
+
+void handleSetWorkAreaLimit() {
+  if (server.hasArg("axis") && server.hasArg("limit") && server.hasArg("value")) {
+    String axisStr = server.arg("axis");
+    String limitStr = server.arg("limit");
+    float value = server.arg("value").toFloat();
+    
+    char axis = (axisStr == "X" || axisStr == "x") ? 'X' : 'Y';
+    char limit = (limitStr == "min" || limitStr == "Min") ? 'M' : 'X';
+    
+    motionController.setWorkAreaLimit(axis, limit, value);
+    
+    // Save to preferences
+    preferences.begin("plotter", false);
+    preferences.putFloat("minX", motionController.getMinX());
+    preferences.putFloat("maxX", motionController.getMaxX());
+    preferences.putFloat("minY", motionController.getMinY());
+    preferences.putFloat("maxY", motionController.getMaxY());
+    preferences.end();
+    
+    Serial.print("Work area limit set: ");
+    Serial.print(axis);
+    Serial.print(" ");
+    Serial.print(limitStr);
+    Serial.print(" = ");
+    Serial.println(value, 2);
+    
+    server.send(200, "text/plain", "ok");
+  } else {
+    server.send(400, "text/plain", "error: missing parameters");
+  }
+}
+
+void handleSetStepLimit() {
+  if (server.hasArg("axis") && server.hasArg("limit") && server.hasArg("steps")) {
+    String axisStr = server.arg("axis");
+    String limitStr = server.arg("limit");
+    long steps = server.arg("steps").toInt();
+    
+    // Save step limits to preferences (in steps, not mm)
+    preferences.begin("calibration", false);
+    if (axisStr == "X" || axisStr == "x") {
+      if (limitStr == "positive" || limitStr == "max") {
+        preferences.putLong("xMaxSteps", steps);
+        Serial.print("X-axis max steps set to: ");
+      } else {
+        preferences.putLong("xMinSteps", steps);
+        Serial.print("X-axis min steps set to: ");
+      }
+    } else {
+      if (limitStr == "positive" || limitStr == "max") {
+        preferences.putLong("yMaxSteps", steps);
+        Serial.print("Y-axis max steps set to: ");
+      } else {
+        preferences.putLong("yMinSteps", steps);
+        Serial.print("Y-axis min steps set to: ");
+      }
+    }
+    preferences.end();
+    Serial.println(steps);
+    
+    server.send(200, "text/plain", "ok");
+  } else {
+    server.send(400, "text/plain", "error: missing parameters");
+  }
+}
+
+void handleFinishCalibration() {
+  // Load step limits from calibration
+  preferences.begin("calibration", true);
+  long xMinSteps = preferences.getLong("xMinSteps", 0);
+  long xMaxSteps = preferences.getLong("xMaxSteps", 0);
+  long yMinSteps = preferences.getLong("yMinSteps", 0);
+  long yMaxSteps = preferences.getLong("yMaxSteps", 0);
+  preferences.end();
+  
+  // Ensure min < max (swap if needed)
+  if (xMinSteps > xMaxSteps) { long temp = xMinSteps; xMinSteps = xMaxSteps; xMaxSteps = temp; }
+  if (yMinSteps > yMaxSteps) { long temp = yMinSteps; yMinSteps = yMaxSteps; yMaxSteps = temp; }
+  
+  // Get current steps/mm to convert to mm
+  float stepsPerMM_X = motionController.getStepsPerMM_X();
+  float stepsPerMM_Y = motionController.getStepsPerMM_Y();
+  
+  // Convert step limits to mm
+  // Note: If Y uses negative values (e.g., -680 to 0), we preserve that
+  float minX_mm = xMinSteps / stepsPerMM_X;
+  float maxX_mm = xMaxSteps / stepsPerMM_X;
+  float minY_mm = yMinSteps / stepsPerMM_Y;
+  float maxY_mm = yMaxSteps / stepsPerMM_Y;
+  
+  // Set work area - these are the physical limits in mm
+  motionController.setWorkArea(minX_mm, maxX_mm, minY_mm, maxY_mm);
+  
+  // Save step limits and work area to preferences
+  preferences.begin("plotter", false);
+  preferences.putFloat("minX", minX_mm);
+  preferences.putFloat("maxX", maxX_mm);
+  preferences.putFloat("minY", minY_mm);
+  preferences.putFloat("maxY", maxY_mm);
+  preferences.putLong("xMinSteps", xMinSteps);
+  preferences.putLong("xMaxSteps", xMaxSteps);
+  preferences.putLong("yMinSteps", yMinSteps);
+  preferences.putLong("yMaxSteps", yMaxSteps);
+  if (server.hasArg("motor1Axis")) {
+    preferences.putString("motor1Axis", server.arg("motor1Axis"));
+  }
+  preferences.end();
+  
+  Serial.print("Calibration complete! Step limits: X[");
+  Serial.print(xMinSteps);
+  Serial.print(",");
+  Serial.print(xMaxSteps);
+  Serial.print("] Y[");
+  Serial.print(yMinSteps);
+  Serial.print(",");
+  Serial.print(yMaxSteps);
+  Serial.print("] | Work area (mm): X[");
+  Serial.print(minX_mm, 1);
+  Serial.print(",");
+  Serial.print(maxX_mm, 1);
+  Serial.print("] Y[");
+  Serial.print(minY_mm, 1);
+  Serial.print(",");
+  Serial.print(maxY_mm, 1);
+  Serial.println("]");
+  
+  server.send(200, "text/plain", "ok");
+}
+
+void handleQueueStatus() {
+  String json = "{";
+  json += "\"size\":" + String(QUEUE_SIZE) + ",";
+  json += "\"used\":" + String(commandQueue.getCount()) + ",";
+  json += "\"free\":" + String(QUEUE_SIZE - commandQueue.getCount()) + ",";
+  json += "\"state\":\"" + stateMachine.getStateString() + "\"";
+  json += "}";
+  
+  server.send(200, "application/json", json);
+}
+
+void handleUploadGcode() {
+  // Handle batch G-code upload (POST with body containing G-code lines)
+  if (server.hasArg("plain")) {
+    String gcodeContent = server.arg("plain");
+    int linesQueued = 0;
+    int linesFailed = 0;
+    
+    // Split by newlines and queue each command
+    int startPos = 0;
+    while (startPos < gcodeContent.length()) {
+      int endPos = gcodeContent.indexOf('\n', startPos);
+      if (endPos == -1) endPos = gcodeContent.length();
+      
+      String line = gcodeContent.substring(startPos, endPos);
+      line.trim();
+      
+      if (line.length() > 0 && !line.startsWith(";")) {  // Skip empty lines and comments
+        Command parsedCmd = parseCommand(line);
+        
+        if (parsedCmd.valid) {
+          if (commandQueue.enqueue(parsedCmd)) {
+            linesQueued++;
+          } else {
+            linesFailed++;
+            break;  // Queue full, stop processing
+          }
+        } else {
+          linesFailed++;
+        }
+      }
+      
+      startPos = endPos + 1;
+    }
+    
+    String response = "{";
+    response += "\"queued\":" + String(linesQueued) + ",";
+    response += "\"failed\":" + String(linesFailed) + ",";
+    response += "\"queueFree\":" + String(QUEUE_SIZE - commandQueue.getCount());
+    response += "}";
+    
+    Serial.print("Batch upload: ");
+    Serial.print(linesQueued);
+    Serial.print(" queued, ");
+    Serial.print(linesFailed);
+    Serial.println(" failed");
+    
+    server.send(200, "application/json", response);
+  } else {
+    server.send(400, "text/plain", "error: no G-code content");
   }
 }
 
@@ -602,15 +1371,25 @@ void setup() {
   Serial.println("Using AccelStepper library");
   Serial.println("Initializing...");
   
-  // Load step mode from preferences (must be done before stepper objects are used)
+  // Load motor settings from preferences (must be done before stepper objects are used)
   preferences.begin("motor", true);  // Read-only mode
   int savedMode = preferences.getInt("stepMode", AccelStepper::HALF4WIRE);
+  float savedMaxSpeed = preferences.getFloat("maxSpeed", 1000.0);
+  float savedAcceleration = preferences.getFloat("acceleration", 1000.0);
+  int savedPowerRunning = preferences.getInt("powerRunning", 250);
+  int savedPowerHolding = preferences.getInt("powerHolding", 120);
   preferences.end();
   
   // Update stepMode if a saved value exists
   if (savedMode == AccelStepper::FULL4WIRE || savedMode == AccelStepper::HALF4WIRE) {
     stepMode = savedMode;
   }
+  
+  // Load saved speed and power settings
+  maxSpeed = savedMaxSpeed;
+  acceleration = savedAcceleration;
+  motorPowerRunning = savedPowerRunning;
+  motorPowerHolding = savedPowerHolding;
   
   Serial.print("Step mode loaded: ");
   Serial.println((stepMode == AccelStepper::HALF4WIRE) ? "HALF STEP" : "FULL STEP");
@@ -639,17 +1418,56 @@ void setup() {
   
   // Initialize motion controller
   motionController.initialize();
-  motionController.setStepsPerMM(STEPS_PER_MM_X, STEPS_PER_MM_Y);
+  
+  // Load saved configuration from preferences
+  preferences.begin("plotter", true);  // Read-only mode
+  float savedStepsPerMM_X = preferences.getFloat("stepsPerMM_X", STEPS_PER_MM_X);
+  float savedStepsPerMM_Y = preferences.getFloat("stepsPerMM_Y", STEPS_PER_MM_Y);
+  float savedMinX = preferences.getFloat("minX", MIN_X_MM);
+  float savedMaxX = preferences.getFloat("maxX", MAX_X_MM);
+  float savedMinY = preferences.getFloat("minY", MIN_Y_MM);
+  float savedMaxY = preferences.getFloat("maxY", MAX_Y_MM);
+  bool savedInvertX = preferences.getBool("invertX", false);
+  bool savedInvertY = preferences.getBool("invertY", false);
+  preferences.end();
+  
+  // Apply saved configuration
+  motionController.setStepsPerMM(savedStepsPerMM_X, savedStepsPerMM_Y);
+  motionController.setWorkArea(savedMinX, savedMaxX, savedMinY, savedMaxY);
+  motionController.setInvertX(savedInvertX);
+  motionController.setInvertY(savedInvertY);
+  
+  Serial.print("Loaded configuration: ");
+  Serial.print("Steps/mm X=");
+  Serial.print(savedStepsPerMM_X, 2);
+  Serial.print(" Y=");
+  Serial.print(savedStepsPerMM_Y, 2);
+  Serial.print(" | Work area X[");
+  Serial.print(savedMinX, 1);
+  Serial.print(",");
+  Serial.print(savedMaxX, 1);
+  Serial.print("] Y[");
+  Serial.print(savedMinY, 1);
+  Serial.print(",");
+  Serial.print(savedMaxY, 1);
+  Serial.print("] | Direction X:");
+  Serial.print(savedInvertX ? "inverted" : "normal");
+  Serial.print(" Y:");
+  Serial.println(savedInvertY ? "inverted" : "normal");
   
   Serial.println("Stepper motors initialized!");
   Serial.print("Step Mode: ");
   Serial.println((stepMode == AccelStepper::HALF4WIRE) ? "HALF STEP" : "FULL STEP");
   Serial.print("Max Speed: ");
   Serial.print(maxSpeed);
-  Serial.println(" steps/sec");
+  Serial.println(" steps/sec (loaded from flash)");
   Serial.print("Acceleration: ");
   Serial.print(acceleration);
-  Serial.println(" steps/sec^2");
+  Serial.println(" steps/sec^2 (loaded from flash)");
+  Serial.print("Motor Power - Running: ");
+  Serial.print(motorPowerRunning);
+  Serial.print(" Holding: ");
+  Serial.println(motorPowerHolding);
   Serial.print("Steps per mm - X: ");
   Serial.print(STEPS_PER_MM_X);
   Serial.print(" Y: ");
@@ -672,6 +1490,18 @@ void setup() {
   server.on("/setpower", handleSetPower);
   server.on("/setstepmode", handleSetStepMode);
   server.on("/gcode", handleGcode);
+  server.on("/setstepspermm", handleSetStepsPerMM);
+  server.on("/setworkarea", handleSetWorkArea);
+  server.on("/getworkarea", handleGetWorkArea);
+  server.on("/getposition", handleGetPosition);
+  server.on("/flipdirection", handleFlipDirection);
+  server.on("/getdirection", handleGetDirection);
+  server.on("/sethomeposition", handleSetHomePosition);
+  server.on("/setworkarealimit", handleSetWorkAreaLimit);
+  server.on("/setsteplimit", handleSetStepLimit);
+  server.on("/finishcalibration", handleFinishCalibration);
+  server.on("/queuestatus", handleQueueStatus);
+  server.on("/uploadgcode", HTTP_POST, handleUploadGcode);
   
   server.begin();
   Serial.println("Web server started!");
