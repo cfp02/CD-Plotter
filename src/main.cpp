@@ -1962,7 +1962,6 @@ void loop() {
           
         case 'D':
           // Disable manual mode when executing dot commands (return to automatic control)
-          manualServoMode = false;
           motionController.setManualMode(false);
           // D - Dot command
           success = motionController.executeDot(currentCommand.x, currentCommand.y);
@@ -1972,7 +1971,6 @@ void loop() {
         case 'P':
           // P0 - Pen up, P1 - Pen down
           // Disable manual mode when executing pen commands (return to automatic control)
-          manualServoMode = false;
           motionController.setManualMode(false);
           if (currentCommand.code == 0) {
             success = motionController.executePenUp();
