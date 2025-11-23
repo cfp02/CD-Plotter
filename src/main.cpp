@@ -49,7 +49,7 @@ WebServer server(80);
 // STBY pins are tied directly to 3.3V (not controlled by ESP32)
 
 // PWM settings for ESP32
-#define PWM_FREQUENCY 5000
+#define PWM_FREQUENCY 20000  // 20 kHz (ultrasonic - above human hearing ~20 kHz)
 #define PWM_RESOLUTION 8  // 8-bit resolution (0-255)
 #define PWM_CHANNEL_M1A 0
 #define PWM_CHANNEL_M1B 1
