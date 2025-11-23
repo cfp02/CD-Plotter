@@ -23,6 +23,7 @@ MotionController::MotionController(AccelStepper* xStepper, AccelStepper* ySteppe
     dotState = DOT_MOVE_DONE;
     penUpAngle = 0;
     penDownAngle = 90;
+    manualMode = false;
 }
 
 void MotionController::initialize() {
@@ -121,6 +122,8 @@ bool MotionController::executeRapidMove(float x_mm, float y_mm) {
     
     // Execute moves (pen up for rapid move)
     penDown = false;
+    // Don't write to servo here - only update state
+    // Servo will be controlled by executePenUp/PenDown commands
     // TODO: Actual pen servo control here
     
     if (deltaX != 0) {
@@ -167,7 +170,8 @@ bool MotionController::executeLinearMove(float x_mm, float y_mm) {
     
     // Execute moves (pen down for linear move)
     penDown = true;
-    if (penServo) {
+    // Only write to servo if not in manual mode
+    if (penServo && !manualMode) {
         penServo->write(penDownAngle);
     }
     
@@ -216,7 +220,7 @@ void MotionController::update() {
             if (dotState == DOT_MOVE_DONE) {
                 // Pen down
                 penDown = true;
-                if (penServo) {
+                if (penServo && !manualMode) {
                     penServo->write(penDownAngle);
                 }
                 dotState = DOT_PEN_DOWN;
@@ -229,7 +233,7 @@ void MotionController::update() {
                 if (millis() - dotStartTime >= dotDwellMs) {
                     // Pen up
                     penDown = false;
-                    if (penServo) {
+                    if (penServo && !manualMode) {
                         penServo->write(penUpAngle);
                     }
                     dotInProgress = false;
@@ -240,9 +244,14 @@ void MotionController::update() {
     }
 }
 
+void MotionController::setManualMode(bool manual) {
+    manualMode = manual;
+}
+
 bool MotionController::executePenUp() {
     penDown = false;
-    if (penServo) {
+    // Only write to servo if not in manual mode
+    if (penServo && !manualMode) {
         penServo->write(penUpAngle);
     }
     return true;
@@ -250,7 +259,8 @@ bool MotionController::executePenUp() {
 
 bool MotionController::executePenDown() {
     penDown = true;
-    if (penServo) {
+    // Only write to servo if not in manual mode
+    if (penServo && !manualMode) {
         penServo->write(penDownAngle);
     }
     return true;
@@ -303,16 +313,14 @@ bool MotionController::getPenState() const {
 
 void MotionController::setPenUpAngle(int angle) {
     penUpAngle = angle;
-    if (!penDown && penServo) {
-        penServo->write(penUpAngle);
-    }
+    // Don't write to servo here - only update when pen state changes
+    // This prevents interference with manual servo control
 }
 
 void MotionController::setPenDownAngle(int angle) {
     penDownAngle = angle;
-    if (penDown && penServo) {
-        penServo->write(penDownAngle);
-    }
+    // Don't write to servo here - only update when pen state changes
+    // This prevents interference with manual servo control
 }
 
 void MotionController::setDotDwellMs(unsigned long ms) {

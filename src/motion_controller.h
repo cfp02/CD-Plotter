@@ -46,6 +46,9 @@ private:
     // Pen servo angles
     int penUpAngle;
     int penDownAngle;
+    
+    // Manual mode flag (set externally to prevent interference)
+    bool manualMode;
 
 public:
     MotionController(AccelStepper* xStepper, AccelStepper* yStepper, Servo* servo);
@@ -84,6 +87,7 @@ public:
     int getPenUpAngle() const;
     int getPenDownAngle() const;
     unsigned long getDotDwellMs() const;
+    void setManualMode(bool manual);
     
     // Configuration getters
     float getStepsPerMM_X() const;

@@ -53,10 +53,11 @@ Servo penServo;
 // PWM settings for ESP32
 #define PWM_FREQUENCY 20000  // 20 kHz (ultrasonic - above human hearing ~20 kHz)
 #define PWM_RESOLUTION 8  // 8-bit resolution (0-255)
-#define PWM_CHANNEL_M1A 0
-#define PWM_CHANNEL_M1B 1
-#define PWM_CHANNEL_M2A 2
-#define PWM_CHANNEL_M2B 3
+// Use channels 4-7 for motors to avoid conflict with ESP32Servo (which uses channels 0-3)
+#define PWM_CHANNEL_M1A 4
+#define PWM_CHANNEL_M1B 5
+#define PWM_CHANNEL_M2A 6
+#define PWM_CHANNEL_M2B 7
 
 // Motor power settings (0-255, lower = less heat but less torque)
 #define MOTOR_POWER_RUNNING 180  // Power when moving (70% - reduces heat)
@@ -82,6 +83,9 @@ int motorPowerHolding = 120;      // Power when holding (0-255, 47%)
 int penUpAngle = 0;               // Servo angle for pen up (0-180 degrees)
 int penDownAngle = 90;            // Servo angle for pen down (0-180 degrees)
 unsigned long dotDwellMs = 50;    // Dwell time for dot command (milliseconds)
+int currentServoAngle = 0;        // Track current servo position to maintain it
+unsigned long lastServoWrite = 0; // Track when servo was last written
+// Manual mode is handled by motionController.setManualMode() - no need for separate flag
 
 // AccelStepper setup - mode will be set dynamically
 // Motor 1
@@ -282,7 +286,7 @@ String getHTMLPage() {
   html += "</div>";
   html += "<div class=\"settings-row\" style=\"margin-top: 10px;\">";
   html += "<label>Direct Servo Control (0-180°):</label>";
-  html += "<input type=\"range\" id=\"servoAngle\" min=\"0\" max=\"180\" value=\"" + String(penUpAngle) + "\" style=\"width: 200px; margin: 0 10px;\" oninput=\"document.getElementById('servoAngleValue').textContent = this.value + '°'; setServoAngle(this.value);\">";
+  html += "<input type=\"range\" id=\"servoAngle\" min=\"0\" max=\"180\" value=\"" + String(penUpAngle) + "\" style=\"width: 200px; margin: 0 10px;\" oninput=\"document.getElementById('servoAngleValue').textContent = this.value + '°'; clearTimeout(servoAngleTimeout); servoAngleTimeout = setTimeout(() => setServoAngle(this.value), 150);\">";
   html += "<span id=\"servoAngleValue\" style=\"font-weight: bold; min-width: 50px; display: inline-block;\">" + String(penUpAngle) + "°</span>";
   html += "<button onclick=\"setServoAngle(document.getElementById('servoAngle').value)\" style=\"margin-left: 10px;\">Set</button>";
   html += "</div>";
@@ -516,7 +520,9 @@ String getHTMLPage() {
   html += "showStatus('Pen moved to ' + state + ' position');";
   html += "});";
   html += "}";
+  html += "let servoAngleTimeout = null;";
   html += "function setServoAngle(angle) {";
+  html += "if (servoAngleTimeout) clearTimeout(servoAngleTimeout);";
   html += "fetch('/setservoangle?angle=' + angle).then(r => r.text()).then(result => {";
   html += "if (result === 'ok') {";
   html += "showStatus('Servo set to ' + angle + '°');";
@@ -1117,22 +1123,24 @@ void handleSetServoAngle() {
       return;
     }
     
-    // Ensure servo is attached
+    // Enable manual mode to prevent motion controller interference
+    motionController.setManualMode(true);
+    
+    // Ensure servo is attached (uses channels 0-3, motors use 4-7)
     if (!penServo.attached()) {
       penServo.attach(SERVO_PIN, 500, 2500);
-      delay(100);
     }
     
-    // Write directly to servo - bypass motion controller
-    // Write multiple times to ensure it holds
-    for (int i = 0; i < 5; i++) {
-      penServo.write(angle);
-      delay(150);  // Give servo time to move and settle
-    }
+    // Update tracked angle
+    currentServoAngle = angle;
+    lastServoWrite = millis();
+    
+    // Write once - ESP32Servo maintains position automatically via continuous PWM
+    penServo.write(angle);
     
     Serial.print("Direct servo control: Set to ");
     Serial.print(angle);
-    Serial.println("°");
+    Serial.println("° (manual mode enabled)");
     
     server.send(200, "text/plain", "ok");
   } else {
@@ -1144,10 +1152,12 @@ void handleTestPen() {
   if (server.hasArg("state")) {
     String state = server.arg("state");
     
+    // Enable manual mode to prevent motion controller interference
+    motionController.setManualMode(true);
+    
     // Ensure servo is attached (in case it got detached somehow)
     if (!penServo.attached()) {
       penServo.attach(SERVO_PIN, 500, 2500);
-      delay(100);
     }
     
     int targetAngle;
@@ -1160,22 +1170,18 @@ void handleTestPen() {
       return;
     }
     
-    Serial.print("Test: Pen button clicked - ");
+    // Update tracked angle
+    currentServoAngle = targetAngle;
+    lastServoWrite = millis();
+    
+    // Write once - ESP32Servo maintains position automatically via continuous PWM
+    penServo.write(targetAngle);
+    
+    Serial.print("Test: Pen moved to ");
     Serial.print(state);
-    Serial.print(" angle should be: ");
+    Serial.print(" position (angle: ");
     Serial.print(targetAngle);
-    Serial.println("°");
-    
-    // Write directly to servo - don't use motion controller to avoid conflicts
-    // Write multiple times to ensure it holds position
-    for (int i = 0; i < 5; i++) {
-      penServo.write(targetAngle);
-      delay(150);  // Give servo time to move and settle
-    }
-    
-    Serial.print("Test: Servo written to ");
-    Serial.print(targetAngle);
-    Serial.println("°");
+    Serial.println("°) (manual mode enabled)");
     
     server.send(200, "text/plain", "ok");
   } else {
@@ -1780,7 +1786,9 @@ void setup() {
   setMotorPower(motorPowerHolding);
   
   // Initialize servo for pen control
-  // ESP32Servo attach with min/max pulse widths (500-2500 microseconds for standard servos)
+  // ESP32Servo uses LEDC channels 0-3 by default, so we moved motors to channels 4-7
+  // Allocate timer 0 for the servo (servos need 50Hz, motors use 20kHz, so different timers)
+  // Note: ESP32Servo will automatically use available channels 0-3
   penServo.attach(SERVO_PIN, 500, 2500);
   delay(100);  // Give servo time to initialize
   penServo.write(penUpAngle);  // Start with pen up
@@ -1931,6 +1939,8 @@ void loop() {
       
       switch (currentCommand.type) {
         case 'G':
+          // Disable manual mode when executing G-code commands (return to automatic control)
+          motionController.setManualMode(false);
           if (currentCommand.code == 0) {
             // G0 - Rapid move (pen up)
             // Use current position if coordinate not specified
@@ -1951,6 +1961,9 @@ void loop() {
           break;
           
         case 'D':
+          // Disable manual mode when executing dot commands (return to automatic control)
+          manualServoMode = false;
+          motionController.setManualMode(false);
           // D - Dot command
           success = motionController.executeDot(currentCommand.x, currentCommand.y);
           if (!success) errorMsg = "position out of bounds";
@@ -1958,6 +1971,9 @@ void loop() {
           
         case 'P':
           // P0 - Pen up, P1 - Pen down
+          // Disable manual mode when executing pen commands (return to automatic control)
+          manualServoMode = false;
+          motionController.setManualMode(false);
           if (currentCommand.code == 0) {
             success = motionController.executePenUp();
           } else if (currentCommand.code == 1) {
@@ -2058,5 +2074,6 @@ void loop() {
     
     lastPowerCheck = millis();
   }
+  
 }
 
