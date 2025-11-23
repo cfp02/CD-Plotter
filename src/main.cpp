@@ -8,6 +8,14 @@
 // Copy wifi_config.h.example to wifi_config.h and fill in your credentials
 #include "wifi_config.h"
 
+// G-code interpreter modules
+#include "config.h"
+#include "gcode_parser.h"
+#include "command_queue.h"
+#include "motion_controller.h"
+#include "plotter_state.h"
+#include "serial_interface.h"
+
 // Web server on port 80
 WebServer server(80);
 
@@ -75,6 +83,12 @@ AccelStepper stepper1(stepMode,
 AccelStepper stepper2(stepMode, 
                       MOTOR2_AIN1, MOTOR2_AIN2, 
                       MOTOR2_BIN1, MOTOR2_BIN2);
+
+// G-code interpreter system
+CommandQueue commandQueue;
+PlotterStateMachine stateMachine;
+MotionController motionController(&stepper1, &stepper2);
+SerialInterface serialInterface(&commandQueue);
 
 // Function to set motor power via PWM
 void setMotorPower(int power) {
@@ -526,6 +540,10 @@ void setup() {
   stepper1.setCurrentPosition(0);
   stepper2.setCurrentPosition(0);
   
+  // Initialize motion controller
+  motionController.initialize();
+  motionController.setStepsPerMM(STEPS_PER_MM_X, STEPS_PER_MM_Y);
+  
   Serial.println("Stepper motors initialized!");
   Serial.print("Step Mode: ");
   Serial.println((stepMode == AccelStepper::HALF4WIRE) ? "HALF STEP" : "FULL STEP");
@@ -535,6 +553,11 @@ void setup() {
   Serial.print("Acceleration: ");
   Serial.print(acceleration);
   Serial.println(" steps/sec^2");
+  Serial.print("Steps per mm - X: ");
+  Serial.print(STEPS_PER_MM_X);
+  Serial.print(" Y: ");
+  Serial.println(STEPS_PER_MM_Y);
+  Serial.println("G-code interpreter ready. Send commands via serial.");
   
   // Setup WiFi and Web Server
   setupWiFi();
@@ -562,10 +585,143 @@ void loop() {
   // Handle web server requests
   server.handleClient();
   
+  // Process serial input for G-code commands
+  serialInterface.processSerialInput();
+  
+  // Update motion controller (handles dot dwell timing)
+  motionController.update();
+  
   // AccelStepper must be called as often as possible for smooth motion
   // This is non-blocking and handles acceleration/deceleration automatically
   stepper1.run();
   stepper2.run();
+  
+  // G-code command execution
+  static Command currentCommand;
+  static bool commandInProgress = false;
+  
+  // Check if we can process next command
+  if (stateMachine.getState() == STATE_IDLE && !commandInProgress) {
+    // Try to dequeue next command
+    if (commandQueue.dequeue(currentCommand)) {
+      commandInProgress = true;
+      stateMachine.setState(STATE_MOVING);
+      
+      // Execute command based on type
+      bool success = false;
+      String errorMsg = "";
+      
+      switch (currentCommand.type) {
+        case 'G':
+          if (currentCommand.code == 0) {
+            // G0 - Rapid move (pen up)
+            // Use current position if coordinate not specified
+            float x = currentCommand.hasX ? currentCommand.x : motionController.getX_mm();
+            float y = currentCommand.hasY ? currentCommand.y : motionController.getY_mm();
+            success = motionController.executeRapidMove(x, y);
+            if (!success) errorMsg = "position out of bounds";
+          } else if (currentCommand.code == 1) {
+            // G1 - Linear move (pen down)
+            // Use current position if coordinate not specified
+            float x = currentCommand.hasX ? currentCommand.x : motionController.getX_mm();
+            float y = currentCommand.hasY ? currentCommand.y : motionController.getY_mm();
+            success = motionController.executeLinearMove(x, y);
+            if (!success) errorMsg = "position out of bounds";
+          } else {
+            errorMsg = "unsupported G code";
+          }
+          break;
+          
+        case 'D':
+          // D - Dot command
+          success = motionController.executeDot(currentCommand.x, currentCommand.y);
+          if (!success) errorMsg = "position out of bounds";
+          break;
+          
+        case 'P':
+          // P0 - Pen up, P1 - Pen down
+          if (currentCommand.code == 0) {
+            success = motionController.executePenUp();
+          } else if (currentCommand.code == 1) {
+            success = motionController.executePenDown();
+          }
+          break;
+          
+        case 'H':
+          // H - Home
+          success = motionController.executeHome();
+          break;
+          
+        case 'M':
+          // M114 - Get position, M119 - Get limits
+          if (currentCommand.code == 114) {
+            Serial.print("X:");
+            Serial.print(motionController.getX_mm(), 2);
+            Serial.print(" Y:");
+            Serial.print(motionController.getY_mm(), 2);
+            Serial.print(" Pen:");
+            Serial.println(motionController.getPenState() ? "DOWN" : "UP");
+            serialInterface.sendOK();
+            commandInProgress = false;
+            stateMachine.setState(STATE_IDLE);
+            success = true;  // Mark as handled
+          } else if (currentCommand.code == 119) {
+            Serial.println("X:0 Y:0");  // Placeholder - no limit switches yet
+            serialInterface.sendOK();
+            commandInProgress = false;
+            stateMachine.setState(STATE_IDLE);
+            success = true;  // Mark as handled
+          } else {
+            errorMsg = "unsupported M code";
+          }
+          break;
+          
+        case '!':
+          // Emergency stop
+          stepper1.stop();
+          stepper2.stop();
+          stateMachine.emergencyStop();
+          serialInterface.sendOK();
+          commandInProgress = false;
+          success = true;  // Mark as handled
+          break;
+          
+        case '~':
+          // Resume
+          stateMachine.resume();
+          serialInterface.sendOK();
+          commandInProgress = false;
+          success = true;  // Mark as handled
+          break;
+      }
+      
+      if (!success && errorMsg.length() > 0) {
+        serialInterface.sendError(errorMsg);
+        commandInProgress = false;
+        stateMachine.setState(STATE_IDLE);
+      } else if (success && !motionController.isMoving()) {
+        // Command completed immediately (like P0/P1, H, M commands)
+        // Motion commands will complete when steppers stop
+        if (currentCommand.type == 'P' || currentCommand.type == 'H' || 
+            currentCommand.type == 'M' || currentCommand.type == '!' || 
+            currentCommand.type == '~') {
+          // These commands don't require motion completion
+          // (already handled above with sendOK)
+        }
+      }
+      // Motion commands (G0, G1, D) will complete when steppers stop
+    }
+  }
+  
+  // Check if current command has completed
+  if (commandInProgress && stateMachine.getState() == STATE_MOVING) {
+    if (!motionController.isMoving() && !stepper1.isRunning() && !stepper2.isRunning()) {
+      // Command completed
+      serialInterface.sendOK();
+      commandInProgress = false;
+      stateMachine.setState(STATE_IDLE);
+    }
+  }
   
   // Adjust motor power based on motion state to reduce heat
   // Increase power when moving, reduce when stopped/holding
