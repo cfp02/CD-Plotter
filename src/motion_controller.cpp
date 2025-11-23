@@ -1,8 +1,9 @@
 #include "motion_controller.h"
 
-MotionController::MotionController(AccelStepper* xStepper, AccelStepper* yStepper) {
+MotionController::MotionController(AccelStepper* xStepper, AccelStepper* yStepper, Servo* servo) {
     stepperX = xStepper;
     stepperY = yStepper;
+    penServo = servo;
     currentX_mm = 0.0;
     currentY_mm = 0.0;
     currentX_steps = 0;
@@ -20,6 +21,8 @@ MotionController::MotionController(AccelStepper* xStepper, AccelStepper* ySteppe
     dotInProgress = false;
     dotStartTime = 0;
     dotState = DOT_MOVE_DONE;
+    penUpAngle = 0;
+    penDownAngle = 90;
 }
 
 void MotionController::initialize() {
@@ -164,7 +167,9 @@ bool MotionController::executeLinearMove(float x_mm, float y_mm) {
     
     // Execute moves (pen down for linear move)
     penDown = true;
-    // TODO: Actual pen servo control here
+    if (penServo) {
+        penServo->write(penDownAngle);
+    }
     
     if (deltaX != 0) {
         stepperX->move(deltaX);
@@ -211,7 +216,9 @@ void MotionController::update() {
             if (dotState == DOT_MOVE_DONE) {
                 // Pen down
                 penDown = true;
-                // TODO: Actual pen servo control here
+                if (penServo) {
+                    penServo->write(penDownAngle);
+                }
                 dotState = DOT_PEN_DOWN;
                 dotStartTime = millis();
             } else if (dotState == DOT_PEN_DOWN) {
@@ -222,7 +229,9 @@ void MotionController::update() {
                 if (millis() - dotStartTime >= dotDwellMs) {
                     // Pen up
                     penDown = false;
-                    // TODO: Actual pen servo control here
+                    if (penServo) {
+                        penServo->write(penUpAngle);
+                    }
                     dotInProgress = false;
                     dotState = DOT_MOVE_DONE;  // Reset for next dot
                 }
@@ -233,13 +242,17 @@ void MotionController::update() {
 
 bool MotionController::executePenUp() {
     penDown = false;
-    // TODO: Actual pen servo control here
+    if (penServo) {
+        penServo->write(penUpAngle);
+    }
     return true;
 }
 
 bool MotionController::executePenDown() {
     penDown = true;
-    // TODO: Actual pen servo control here
+    if (penServo) {
+        penServo->write(penDownAngle);
+    }
     return true;
 }
 
@@ -286,6 +299,36 @@ bool MotionController::isMoving() const {
 
 bool MotionController::getPenState() const {
     return penDown;
+}
+
+void MotionController::setPenUpAngle(int angle) {
+    penUpAngle = angle;
+    if (!penDown && penServo) {
+        penServo->write(penUpAngle);
+    }
+}
+
+void MotionController::setPenDownAngle(int angle) {
+    penDownAngle = angle;
+    if (penDown && penServo) {
+        penServo->write(penDownAngle);
+    }
+}
+
+void MotionController::setDotDwellMs(unsigned long ms) {
+    dotDwellMs = ms;
+}
+
+int MotionController::getPenUpAngle() const {
+    return penUpAngle;
+}
+
+int MotionController::getPenDownAngle() const {
+    return penDownAngle;
+}
+
+unsigned long MotionController::getDotDwellMs() const {
+    return dotDwellMs;
 }
 
 float MotionController::getStepsPerMM_X() const {

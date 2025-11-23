@@ -3,6 +3,7 @@
 
 #include <Arduino.h>
 #include <AccelStepper.h>
+#include <ESP32Servo.h>
 #include "gcode_parser.h"
 #include "config.h"
 
@@ -10,6 +11,7 @@ class MotionController {
 private:
     AccelStepper* stepperX;
     AccelStepper* stepperY;
+    Servo* penServo;
     
     // Current position in mm
     float currentX_mm;
@@ -40,9 +42,13 @@ private:
     bool dotInProgress;
     enum DotState { DOT_MOVE_DONE, DOT_PEN_DOWN, DOT_DWELLING };
     DotState dotState;
+    
+    // Pen servo angles
+    int penUpAngle;
+    int penDownAngle;
 
 public:
-    MotionController(AccelStepper* xStepper, AccelStepper* yStepper);
+    MotionController(AccelStepper* xStepper, AccelStepper* yStepper, Servo* servo);
     
     void initialize();
     void setStepsPerMM(float x, float y);
@@ -70,8 +76,14 @@ public:
     bool isMoving() const;
     void update();  // Call in loop() to handle dot dwell timing
     
-    // Pen control (placeholder for future servo)
+    // Pen control
     bool getPenState() const;
+    void setPenUpAngle(int angle);
+    void setPenDownAngle(int angle);
+    void setDotDwellMs(unsigned long ms);
+    int getPenUpAngle() const;
+    int getPenDownAngle() const;
+    unsigned long getDotDwellMs() const;
     
     // Configuration getters
     float getStepsPerMM_X() const;

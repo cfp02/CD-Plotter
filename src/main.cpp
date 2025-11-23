@@ -3,6 +3,7 @@
 #include <WiFi.h>
 #include <WebServer.h>
 #include <Preferences.h>
+#include <ESP32Servo.h>
 
 // WiFi credentials - loaded from wifi_config.h
 // Copy wifi_config.h.example to wifi_config.h and fill in your credentials
@@ -43,8 +44,9 @@ WebServer server(80);
 #define MOTOR2_BIN2 5   // GPIO5 - Motor B Input 2 (CHANGE THIS - was GPIO35)
 #define MOTOR2_PWMB 22  // GPIO22 - Motor B PWM (power control)
 
-// Servo pin for pen control (future implementation)
+// Servo pin for pen control
 #define SERVO_PIN 18    // GPIO18 - Servo control pin for pen up/down
+Servo penServo;
 
 // STBY pins are tied directly to 3.3V (not controlled by ESP32)
 
@@ -76,6 +78,11 @@ int motorPowerRunning = 250;      // Power when moving (0-255, ~98%)
 int motorPowerHolding = 120;      // Power when holding (0-255, 47%)
 #define STEPS_PER_REV 20          // Steps per revolution (CD drive steppers)
 
+// Pen control parameters (adjustable at runtime via web interface)
+int penUpAngle = 0;               // Servo angle for pen up (0-180 degrees)
+int penDownAngle = 90;            // Servo angle for pen down (0-180 degrees)
+unsigned long dotDwellMs = 50;    // Dwell time for dot command (milliseconds)
+
 // AccelStepper setup - mode will be set dynamically
 // Motor 1
 AccelStepper stepper1(stepMode, 
@@ -90,7 +97,7 @@ AccelStepper stepper2(stepMode,
 // G-code interpreter system
 CommandQueue commandQueue;
 PlotterStateMachine stateMachine;
-MotionController motionController(&stepper1, &stepper2);
+MotionController motionController(&stepper1, &stepper2, &penServo);
 SerialInterface serialInterface(&commandQueue);
 
 // Function to set motor power via PWM
@@ -149,6 +156,9 @@ String getHTMLPage() {
   html += "</style></head><body>";
   html += "<div class=\"container\">";
   html += "<h1>ESP32 2D Plotter Control</h1>";
+  
+  // Status message area
+  html += "<div id=\"statusMessage\" style=\"display: none; padding: 10px; margin: 10px 0; border-radius: 5px; background: #4CAF50; color: white; text-align: center; font-weight: bold;\"></div>";
   
   // Settings section
   html += "<div class=\"settings\">";
@@ -248,6 +258,33 @@ String getHTMLPage() {
   html += "<label>Power When Holding (0-255):</label>";
   html += "<input type=\"number\" id=\"powerHolding\" value=\"" + String(motorPowerHolding) + "\" min=\"0\" max=\"255\" step=\"5\">";
   html += "<button onclick=\"setPowerHolding()\">Set</button>";
+  html += "</div>";
+  html += "<h2 style=\"margin-top: 20px;\">Pen Control Settings</h2>";
+  html += "<div class=\"settings-row\">";
+  html += "<label>Pen Up Angle (0-180°):</label>";
+  html += "<input type=\"number\" id=\"penUpAngle\" value=\"" + String(penUpAngle) + "\" min=\"0\" max=\"180\" step=\"1\">";
+  html += "<button onclick=\"setPenUpAngle()\">Set</button>";
+  html += "</div>";
+  html += "<div class=\"settings-row\">";
+  html += "<label>Pen Down Angle (0-180°):</label>";
+  html += "<input type=\"number\" id=\"penDownAngle\" value=\"" + String(penDownAngle) + "\" min=\"0\" max=\"180\" step=\"1\">";
+  html += "<button onclick=\"setPenDownAngle()\">Set</button>";
+  html += "</div>";
+  html += "<div class=\"settings-row\">";
+  html += "<label>Dot Dwell Time (ms):</label>";
+  html += "<input type=\"number\" id=\"dotDwellMs\" value=\"" + String(dotDwellMs) + "\" min=\"10\" max=\"1000\" step=\"10\">";
+  html += "<button onclick=\"setDotDwellMs()\">Set</button>";
+  html += "</div>";
+  html += "<div class=\"settings-row\">";
+  html += "<label>Test Pen:</label>";
+  html += "<button onclick=\"testPen('up')\" style=\"background: #2196F3; margin-left: 10px;\">Pen Up</button>";
+  html += "<button onclick=\"testPen('down')\" style=\"background: #4CAF50; margin-left: 5px;\">Pen Down</button>";
+  html += "</div>";
+  html += "<div class=\"settings-row\" style=\"margin-top: 10px;\">";
+  html += "<label>Direct Servo Control (0-180°):</label>";
+  html += "<input type=\"range\" id=\"servoAngle\" min=\"0\" max=\"180\" value=\"" + String(penUpAngle) + "\" style=\"width: 200px; margin: 0 10px;\" oninput=\"document.getElementById('servoAngleValue').textContent = this.value + '°'; setServoAngle(this.value);\">";
+  html += "<span id=\"servoAngleValue\" style=\"font-weight: bold; min-width: 50px; display: inline-block;\">" + String(penUpAngle) + "°</span>";
+  html += "<button onclick=\"setServoAngle(document.getElementById('servoAngle').value)\" style=\"margin-left: 10px;\">Set</button>";
   html += "</div>";
   html += "<div class=\"settings-row\">";
   html += "<label>Step Mode:</label>";
@@ -416,6 +453,13 @@ String getHTMLPage() {
   
   // JavaScript
   html += "<script>";
+  html += "function showStatus(message, isError = false) {";
+  html += "const statusEl = document.getElementById('statusMessage');";
+  html += "statusEl.textContent = message;";
+  html += "statusEl.style.background = isError ? '#f44336' : '#4CAF50';";
+  html += "statusEl.style.display = 'block';";
+  html += "setTimeout(() => { statusEl.style.display = 'none'; }, 3000);";
+  html += "}";
   html += "function moveTo(motor) {";
   html += "const pos = document.getElementById('pos' + motor).value;";
   html += "fetch('/move?motor=' + motor + '&pos=' + pos);";
@@ -441,28 +485,54 @@ String getHTMLPage() {
   html += "}";
   html += "function setMaxSpeed() {";
   html += "const speed = document.getElementById('maxSpeed').value;";
-  html += "fetch('/setspeed?speed=' + speed).then(() => alert('Max Speed set to ' + speed + ' steps/sec'));";
+  html += "fetch('/setspeed?speed=' + speed).then(() => showStatus('Max Speed set to ' + speed + ' steps/sec'));";
   html += "}";
   html += "function setAcceleration() {";
   html += "const accel = document.getElementById('acceleration').value;";
-  html += "fetch('/setaccel?accel=' + accel).then(() => alert('Acceleration set to ' + accel + ' steps/sec²'));";
+  html += "fetch('/setaccel?accel=' + accel).then(() => showStatus('Acceleration set to ' + accel + ' steps/sec²'));";
   html += "}";
   html += "function setPowerRunning() {";
   html += "const power = document.getElementById('powerRunning').value;";
-  html += "fetch('/setpower?type=running&power=' + power).then(() => alert('Running power set to ' + power));";
+  html += "fetch('/setpower?type=running&power=' + power).then(() => showStatus('Running power set to ' + power));";
   html += "}";
   html += "function setPowerHolding() {";
   html += "const power = document.getElementById('powerHolding').value;";
-  html += "fetch('/setpower?type=holding&power=' + power).then(() => alert('Holding power set to ' + power));";
+  html += "fetch('/setpower?type=holding&power=' + power).then(() => showStatus('Holding power set to ' + power));";
+  html += "}";
+  html += "function setPenUpAngle() {";
+  html += "const angle = document.getElementById('penUpAngle').value;";
+  html += "fetch('/setpenangle?state=up&angle=' + angle).then(() => showStatus('Pen up angle set to ' + angle + '°'));";
+  html += "}";
+  html += "function setPenDownAngle() {";
+  html += "const angle = document.getElementById('penDownAngle').value;";
+  html += "fetch('/setpenangle?state=down&angle=' + angle).then(() => showStatus('Pen down angle set to ' + angle + '°'));";
+  html += "}";
+  html += "function setDotDwellMs() {";
+  html += "const ms = document.getElementById('dotDwellMs').value;";
+  html += "fetch('/setdotdwell?ms=' + ms).then(() => showStatus('Dot dwell time set to ' + ms + ' ms'));";
+  html += "}";
+  html += "function testPen(state) {";
+  html += "fetch('/testpen?state=' + state).then(() => {";
+  html += "showStatus('Pen moved to ' + state + ' position');";
+  html += "});";
+  html += "}";
+  html += "function setServoAngle(angle) {";
+  html += "fetch('/setservoangle?angle=' + angle).then(r => r.text()).then(result => {";
+  html += "if (result === 'ok') {";
+  html += "showStatus('Servo set to ' + angle + '°');";
+  html += "} else {";
+  html += "showStatus('Error: ' + result, true);";
+  html += "}";
+  html += "});";
   html += "}";
   html += "function setStepMode() {";
   html += "const mode = document.getElementById('stepMode').value;";
-  html += "fetch('/setstepmode?mode=' + mode).then(() => alert('Step mode set to ' + mode + '. Please restart ESP32 for changes to take effect.'));";
+  html += "fetch('/setstepmode?mode=' + mode).then(() => showStatus('Step mode set to ' + mode + '. Please restart ESP32 for changes to take effect.'));";
   html += "}";
   html += "function setStepsPerMM(axis) {";
   html += "const value = parseFloat(document.getElementById('stepsPerMM_' + axis).value);";
   html += "fetch('/setstepspermm?axis=' + axis + '&value=' + value).then(() => {";
-  html += "alert('Steps per mm (' + axis + ') set to ' + value);";
+  html += "showStatus('Steps per mm (' + axis + ') set to ' + value);";
   html += "updateCanvas();";
   html += "});";
   html += "}";
@@ -472,7 +542,7 @@ String getHTMLPage() {
   html += "const minY = parseFloat(document.getElementById('minY').value);";
   html += "const maxY = parseFloat(document.getElementById('maxY').value);";
   html += "fetch('/setworkarea?minX=' + minX + '&maxX=' + maxX + '&minY=' + minY + '&maxY=' + maxY).then(() => {";
-  html += "alert('Work area updated');";
+  html += "showStatus('Work area updated');";
   html += "updateCanvas();";
   html += "location.reload();";
   html += "});";
@@ -481,7 +551,7 @@ String getHTMLPage() {
   html += "fetch('/getposition').then(r => r.json()).then(pos => {";
   html += "const value = limit === 'min' ? (axis === 'X' ? pos.x : pos.y) : (axis === 'X' ? pos.x : pos.y);";
   html += "fetch('/setworkarealimit?axis=' + axis + '&limit=' + limit + '&value=' + value.toFixed(2)).then(() => {";
-  html += "alert(axis + ' ' + limit + ' set to ' + value.toFixed(2) + ' mm');";
+  html += "showStatus(axis + ' ' + limit + ' set to ' + value.toFixed(2) + ' mm');";
   html += "location.reload();";
   html += "});";
   html += "});";
@@ -538,7 +608,7 @@ String getHTMLPage() {
   html += "}";
   html += "updateCalLimits();";
   html += "fetch('/setsteplimit?axis=' + calAxis + '&limit=' + direction + '&steps=' + stepPos).then(() => {";
-  html += "alert('Limit set: ' + direction + ' = ' + stepPos + ' steps');";
+  html += "showStatus('Limit set: ' + direction + ' = ' + stepPos + ' steps');";
   html += "});";
   html += "}";
   html += "function updateCalLimits() {";
@@ -549,27 +619,27 @@ String getHTMLPage() {
   html += "}";
   html += "function finishCalibration() {";
   html += "if (calMinStep === null || calMaxStep === null) {";
-  html += "alert('Please set both min and max limits first');";
+  html += "showStatus('Please set both min and max limits first', true);";
   html += "return;";
   html += "}";
   html += "const m1Axis = document.getElementById('motor1Axis').value;";
   html += "fetch('/finishcalibration?motor1Axis=' + m1Axis + '&xMin=' + (calAxis === 'X' ? calMinStep : '') + '&xMax=' + (calAxis === 'X' ? calMaxStep : '') + '&yMin=' + (calAxis === 'Y' ? calMinStep : '') + '&yMax=' + (calAxis === 'Y' ? calMaxStep : '')).then(() => {";
-  html += "alert('Calibration complete! You can now set physical dimensions (steps/mm)');";
+  html += "showStatus('Calibration complete! You can now set physical dimensions (steps/mm)');";
   html += "location.reload();";
   html += "});";
   html += "}";
   html += "function calibrateFromPhysical(axis) {";
   html += "const measured = axis === 'X' ? parseFloat(document.getElementById('measuredXWidth').value) : parseFloat(document.getElementById('measuredYHeight').value);";
   html += "if (measured <= 0) {";
-  html += "alert('Please enter a valid measurement > 0');";
+  html += "showStatus('Please enter a valid measurement > 0', true);";
   html += "return;";
   html += "}";
   html += "fetch('/calibratefromphysical?axis=' + axis + '&size=' + measured).then(r => r.text()).then(result => {";
   html += "if (result === 'ok') {";
-  html += "alert('Calibration complete! Steps/mm and work area updated for ' + axis + ' axis.');";
+  html += "showStatus('Calibration complete! Steps/mm and work area updated for ' + axis + ' axis.');";
   html += "location.reload();";
   html += "} else {";
-  html += "alert('Error: ' + result);";
+  html += "showStatus('Error: ' + result, true);";
   html += "}";
   html += "});";
   html += "}";
@@ -582,7 +652,7 @@ String getHTMLPage() {
   html += "xEl.style.color = data.invertX ? '#f44336' : '#4CAF50';";
   html += "yEl.textContent = data.invertY ? '↑ (inverted)' : '↓ (normal)';";
   html += "yEl.style.color = data.invertY ? '#f44336' : '#4CAF50';";
-  html += "alert('Direction flipped for ' + axis + ' axis');";
+  html += "showStatus('Direction flipped for ' + axis + ' axis');";
   html += "});";
   html += "});";
   html += "}";
@@ -973,6 +1043,143 @@ void handleSetPower() {
     server.send(200, "text/plain", "OK");
   } else {
     server.send(400, "text/plain", "Bad Request");
+  }
+}
+
+void handleSetPenAngle() {
+  if (server.hasArg("state") && server.hasArg("angle")) {
+    String state = server.arg("state");
+    int angle = server.arg("angle").toInt();
+    
+    if (angle < 0 || angle > 180) {
+      server.send(400, "text/plain", "error: angle must be 0-180");
+      return;
+    }
+    
+    preferences.begin("pen", false);
+    if (state == "up") {
+      penUpAngle = angle;
+      motionController.setPenUpAngle(angle);
+      preferences.putInt("penUpAngle", angle);
+      Serial.print("Pen up angle set to: ");
+    } else if (state == "down") {
+      penDownAngle = angle;
+      motionController.setPenDownAngle(angle);
+      preferences.putInt("penDownAngle", angle);
+      Serial.print("Pen down angle set to: ");
+    } else {
+      preferences.end();
+      server.send(400, "text/plain", "error: invalid state (use 'up' or 'down')");
+      return;
+    }
+    preferences.end();
+    Serial.println(angle);
+    
+    server.send(200, "text/plain", "ok");
+  } else {
+    server.send(400, "text/plain", "error: missing parameters");
+  }
+}
+
+void handleSetDotDwell() {
+  if (server.hasArg("ms")) {
+    unsigned long ms = server.arg("ms").toInt();
+    
+    if (ms < 10 || ms > 1000) {
+      server.send(400, "text/plain", "error: dwell time must be 10-1000 ms");
+      return;
+    }
+    
+    dotDwellMs = ms;
+    motionController.setDotDwellMs(ms);
+    
+    // Save to preferences
+    preferences.begin("pen", false);
+    preferences.putULong("dotDwellMs", ms);
+    preferences.end();
+    
+    Serial.print("Dot dwell time set to: ");
+    Serial.print(ms);
+    Serial.println(" ms");
+    
+    server.send(200, "text/plain", "ok");
+  } else {
+    server.send(400, "text/plain", "error: missing parameter");
+  }
+}
+
+void handleSetServoAngle() {
+  if (server.hasArg("angle")) {
+    int angle = server.arg("angle").toInt();
+    
+    if (angle < 0 || angle > 180) {
+      server.send(400, "text/plain", "error: angle must be 0-180");
+      return;
+    }
+    
+    // Ensure servo is attached
+    if (!penServo.attached()) {
+      penServo.attach(SERVO_PIN, 500, 2500);
+      delay(100);
+    }
+    
+    // Write directly to servo - bypass motion controller
+    // Write multiple times to ensure it holds
+    for (int i = 0; i < 5; i++) {
+      penServo.write(angle);
+      delay(150);  // Give servo time to move and settle
+    }
+    
+    Serial.print("Direct servo control: Set to ");
+    Serial.print(angle);
+    Serial.println("°");
+    
+    server.send(200, "text/plain", "ok");
+  } else {
+    server.send(400, "text/plain", "error: missing angle parameter");
+  }
+}
+
+void handleTestPen() {
+  if (server.hasArg("state")) {
+    String state = server.arg("state");
+    
+    // Ensure servo is attached (in case it got detached somehow)
+    if (!penServo.attached()) {
+      penServo.attach(SERVO_PIN, 500, 2500);
+      delay(100);
+    }
+    
+    int targetAngle;
+    if (state == "up") {
+      targetAngle = penUpAngle;
+    } else if (state == "down") {
+      targetAngle = penDownAngle;
+    } else {
+      server.send(400, "text/plain", "error: invalid state (use 'up' or 'down')");
+      return;
+    }
+    
+    Serial.print("Test: Pen button clicked - ");
+    Serial.print(state);
+    Serial.print(" angle should be: ");
+    Serial.print(targetAngle);
+    Serial.println("°");
+    
+    // Write directly to servo - don't use motion controller to avoid conflicts
+    // Write multiple times to ensure it holds position
+    for (int i = 0; i < 5; i++) {
+      penServo.write(targetAngle);
+      delay(150);  // Give servo time to move and settle
+    }
+    
+    Serial.print("Test: Servo written to ");
+    Serial.print(targetAngle);
+    Serial.println("°");
+    
+    server.send(200, "text/plain", "ok");
+  } else {
+    server.send(400, "text/plain", "error: missing parameter");
   }
 }
 
@@ -1534,6 +1741,13 @@ void setup() {
   int savedPowerHolding = preferences.getInt("powerHolding", 120);
   preferences.end();
   
+  // Load pen settings from preferences
+  preferences.begin("pen", true);  // Read-only mode
+  penUpAngle = preferences.getInt("penUpAngle", 0);
+  penDownAngle = preferences.getInt("penDownAngle", 90);
+  dotDwellMs = preferences.getULong("dotDwellMs", 50);
+  preferences.end();
+  
   // Update stepMode if a saved value exists
   if (savedMode == AccelStepper::FULL4WIRE || savedMode == AccelStepper::HALF4WIRE) {
     stepMode = savedMode;
@@ -1565,13 +1779,30 @@ void setup() {
   // Set initial motor power (will be adjusted based on motion state)
   setMotorPower(motorPowerHolding);
   
+  // Initialize servo for pen control
+  // ESP32Servo attach with min/max pulse widths (500-2500 microseconds for standard servos)
+  penServo.attach(SERVO_PIN, 500, 2500);
+  delay(100);  // Give servo time to initialize
+  penServo.write(penUpAngle);  // Start with pen up
+  delay(100);  // Give servo time to move
+  Serial.print("Servo initialized on pin ");
+  Serial.print(SERVO_PIN);
+  Serial.print(" - Pen up: ");
+  Serial.print(penUpAngle);
+  Serial.print("°, Pen down: ");
+  Serial.print(penDownAngle);
+  Serial.println("°");
+  
   // Configure AccelStepper for both motors
   updateMotorSettings();
   stepper1.setCurrentPosition(0);
   stepper2.setCurrentPosition(0);
   
-  // Initialize motion controller
+  // Initialize motion controller (pass pen settings)
   motionController.initialize();
+  motionController.setPenUpAngle(penUpAngle);
+  motionController.setPenDownAngle(penDownAngle);
+  motionController.setDotDwellMs(dotDwellMs);
   
   // Load saved configuration from preferences
   preferences.begin("plotter", true);  // Read-only mode
@@ -1643,6 +1874,10 @@ void setup() {
   server.on("/setaccel", handleSetAcceleration);
   server.on("/setpower", handleSetPower);
   server.on("/setstepmode", handleSetStepMode);
+  server.on("/setpenangle", handleSetPenAngle);
+  server.on("/setdotdwell", handleSetDotDwell);
+  server.on("/testpen", handleTestPen);
+  server.on("/setservoangle", handleSetServoAngle);
   server.on("/gcode", handleGcode);
   server.on("/setstepspermm", handleSetStepsPerMM);
   server.on("/setworkarea", handleSetWorkArea);
