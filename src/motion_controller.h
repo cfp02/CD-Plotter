@@ -23,6 +23,10 @@ private:
     float stepsPerMM_X;
     float stepsPerMM_Y;
     
+    // Direction inversion flags
+    bool invertX;
+    bool invertY;
+    
     // Pen state
     bool penDown;
     
@@ -43,6 +47,7 @@ public:
     void initialize();
     void setStepsPerMM(float x, float y);
     void setWorkArea(float minX, float maxX, float minY, float maxY);
+    void setWorkAreaLimit(char axis, char limit, float value);  // axis: 'X' or 'Y', limit: 'M' (min) or 'M' (max)
     
     // Position management
     float getX_mm() const;
@@ -56,6 +61,7 @@ public:
     bool executePenUp();
     bool executePenDown();
     bool executeHome();
+    void setCurrentPositionAsHome();  // Register current position as home (top-left)
     
     // Coordinate validation
     bool isValidPosition(float x_mm, float y_mm) const;
@@ -66,6 +72,20 @@ public:
     
     // Pen control (placeholder for future servo)
     bool getPenState() const;
+    
+    // Configuration getters
+    float getStepsPerMM_X() const;
+    float getStepsPerMM_Y() const;
+    float getMinX() const;
+    float getMaxX() const;
+    float getMinY() const;
+    float getMaxY() const;
+    
+    // Direction control
+    void setInvertX(bool invert);
+    void setInvertY(bool invert);
+    bool getInvertX() const;
+    bool getInvertY() const;
 };
 
 #endif

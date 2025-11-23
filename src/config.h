@@ -13,7 +13,7 @@
 #define MIN_Y_MM 0.0
 
 // Command queue configuration
-#define QUEUE_SIZE 20
+#define QUEUE_SIZE 100  // Increased for file uploads (ESP32 has enough RAM)
 
 // Serial communication
 #define SERIAL_BAUD 115200

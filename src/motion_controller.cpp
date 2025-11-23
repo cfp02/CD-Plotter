@@ -9,6 +9,8 @@ MotionController::MotionController(AccelStepper* xStepper, AccelStepper* ySteppe
     currentY_steps = 0;
     stepsPerMM_X = STEPS_PER_MM_X;
     stepsPerMM_Y = STEPS_PER_MM_Y;
+    invertX = false;
+    invertY = false;
     penDown = false;
     minX_mm = MIN_X_MM;
     maxX_mm = MAX_X_MM;
@@ -45,6 +47,23 @@ void MotionController::setWorkArea(float minX, float maxX, float minY, float max
     maxY_mm = maxY;
 }
 
+void MotionController::setWorkAreaLimit(char axis, char limit, float value) {
+    // axis: 'X' or 'Y', limit: 'M' (min) or 'X' (max)
+    if (axis == 'X' || axis == 'x') {
+        if (limit == 'M' || limit == 'm') {
+            minX_mm = value;
+        } else if (limit == 'X' || limit == 'x') {
+            maxX_mm = value;
+        }
+    } else if (axis == 'Y' || axis == 'y') {
+        if (limit == 'M' || limit == 'm') {
+            minY_mm = value;
+        } else if (limit == 'X' || limit == 'x') {
+            maxY_mm = value;
+        }
+    }
+}
+
 float MotionController::getX_mm() const {
     return currentX_mm;
 }
@@ -56,10 +75,14 @@ float MotionController::getY_mm() const {
 void MotionController::setPosition(float x_mm, float y_mm) {
     currentX_mm = x_mm;
     currentY_mm = y_mm;
-    currentX_steps = (long)(x_mm * stepsPerMM_X);
-    currentY_steps = (long)(y_mm * stepsPerMM_Y);
-    stepperX->setCurrentPosition(currentX_steps);
-    stepperY->setCurrentPosition(currentY_steps);
+    long xSteps = (long)(x_mm * stepsPerMM_X);
+    long ySteps = (long)(y_mm * stepsPerMM_Y);
+    // Store steps without inversion (inversion is applied during moves)
+    currentX_steps = xSteps;
+    currentY_steps = ySteps;
+    // Apply inversion when setting stepper position
+    stepperX->setCurrentPosition(invertX ? -xSteps : xSteps);
+    stepperY->setCurrentPosition(invertY ? -ySteps : ySteps);
 }
 
 bool MotionController::isValidPosition(float x_mm, float y_mm) const {
@@ -73,13 +96,25 @@ bool MotionController::executeRapidMove(float x_mm, float y_mm) {
         return false;
     }
     
-    // Calculate target steps
-    long targetX_steps = (long)(x_mm * stepsPerMM_X);
-    long targetY_steps = (long)(y_mm * stepsPerMM_Y);
+    // Calculate target steps (without inversion - inversion applied to stepper)
+    long targetX_steps_raw = (long)(x_mm * stepsPerMM_X);
+    long targetY_steps_raw = (long)(y_mm * stepsPerMM_Y);
     
-    // Calculate relative moves
-    long deltaX = targetX_steps - currentX_steps;
-    long deltaY = targetY_steps - currentY_steps;
+    // Get current stepper positions (accounting for inversion)
+    long currentX_stepper = stepperX->currentPosition();
+    long currentY_stepper = stepperY->currentPosition();
+    
+    // Convert stepper positions back to raw steps
+    long currentX_raw = invertX ? -currentX_stepper : currentX_stepper;
+    long currentY_raw = invertY ? -currentY_stepper : currentY_stepper;
+    
+    // Calculate relative moves in raw steps
+    long deltaX_raw = targetX_steps_raw - currentX_raw;
+    long deltaY_raw = targetY_steps_raw - currentY_raw;
+    
+    // Apply inversion for stepper movement
+    long deltaX = invertX ? -deltaX_raw : deltaX_raw;
+    long deltaY = invertY ? -deltaY_raw : deltaY_raw;
     
     // Execute moves (pen up for rapid move)
     penDown = false;
@@ -95,8 +130,8 @@ bool MotionController::executeRapidMove(float x_mm, float y_mm) {
     // Update position
     currentX_mm = x_mm;
     currentY_mm = y_mm;
-    currentX_steps = targetX_steps;
-    currentY_steps = targetY_steps;
+    currentX_steps = targetX_steps_raw;
+    currentY_steps = targetY_steps_raw;
     
     return true;
 }
@@ -107,13 +142,25 @@ bool MotionController::executeLinearMove(float x_mm, float y_mm) {
         return false;
     }
     
-    // Calculate target steps
-    long targetX_steps = (long)(x_mm * stepsPerMM_X);
-    long targetY_steps = (long)(y_mm * stepsPerMM_Y);
+    // Calculate target steps (without inversion - inversion applied to stepper)
+    long targetX_steps_raw = (long)(x_mm * stepsPerMM_X);
+    long targetY_steps_raw = (long)(y_mm * stepsPerMM_Y);
     
-    // Calculate relative moves
-    long deltaX = targetX_steps - currentX_steps;
-    long deltaY = targetY_steps - currentY_steps;
+    // Get current stepper positions (accounting for inversion)
+    long currentX_stepper = stepperX->currentPosition();
+    long currentY_stepper = stepperY->currentPosition();
+    
+    // Convert stepper positions back to raw steps
+    long currentX_raw = invertX ? -currentX_stepper : currentX_stepper;
+    long currentY_raw = invertY ? -currentY_stepper : currentY_stepper;
+    
+    // Calculate relative moves in raw steps
+    long deltaX_raw = targetX_steps_raw - currentX_raw;
+    long deltaY_raw = targetY_steps_raw - currentY_raw;
+    
+    // Apply inversion for stepper movement
+    long deltaX = invertX ? -deltaX_raw : deltaX_raw;
+    long deltaY = invertY ? -deltaY_raw : deltaY_raw;
     
     // Execute moves (pen down for linear move)
     penDown = true;
@@ -129,8 +176,8 @@ bool MotionController::executeLinearMove(float x_mm, float y_mm) {
     // Update position
     currentX_mm = x_mm;
     currentY_mm = y_mm;
-    currentX_steps = targetX_steps;
-    currentY_steps = targetY_steps;
+    currentX_steps = targetX_steps_raw;
+    currentY_steps = targetY_steps_raw;
     
     return true;
 }
@@ -197,10 +244,40 @@ bool MotionController::executePenDown() {
 }
 
 bool MotionController::executeHome() {
-    // Placeholder: just set position to 0,0
-    // TODO: Implement actual homing with limit switches
-    setPosition(0.0, 0.0);
-    return true;
+    // Move to home position (top-left corner: minX, maxY)
+    // This is the typical home position for plotters
+    float homeX = minX_mm;
+    float homeY = maxY_mm;
+    
+    // Execute rapid move to home position
+    return executeRapidMove(homeX, homeY);
+}
+
+void MotionController::setCurrentPositionAsHome() {
+    // Register current position as the new home (0, 0)
+    // This ONLY sets the coordinate origin - does NOT change work area limits
+    // The work area limits should already be set correctly from calibration
+    
+    // Get current stepper positions
+    long currentX_stepper = stepperX->currentPosition();
+    long currentY_stepper = stepperY->currentPosition();
+    
+    // Convert to raw steps (remove inversion)
+    long currentX_raw = invertX ? -currentX_stepper : currentX_stepper;
+    long currentY_raw = invertY ? -currentY_stepper : currentY_stepper;
+    
+    // Reset stepper positions to 0 (accounting for inversion)
+    // This makes the current physical position = (0,0) in our coordinate system
+    stepperX->setCurrentPosition(0);
+    stepperY->setCurrentPosition(0);
+    
+    // Set our tracking to (0,0)
+    currentX_mm = 0.0;
+    currentY_mm = 0.0;
+    currentX_steps = 0;
+    currentY_steps = 0;
+    
+    // Work area limits remain unchanged - they define the physical boundaries
 }
 
 bool MotionController::isMoving() const {
@@ -209,5 +286,45 @@ bool MotionController::isMoving() const {
 
 bool MotionController::getPenState() const {
     return penDown;
+}
+
+float MotionController::getStepsPerMM_X() const {
+    return stepsPerMM_X;
+}
+
+float MotionController::getStepsPerMM_Y() const {
+    return stepsPerMM_Y;
+}
+
+float MotionController::getMinX() const {
+    return minX_mm;
+}
+
+float MotionController::getMaxX() const {
+    return maxX_mm;
+}
+
+float MotionController::getMinY() const {
+    return minY_mm;
+}
+
+float MotionController::getMaxY() const {
+    return maxY_mm;
+}
+
+void MotionController::setInvertX(bool invert) {
+    invertX = invert;
+}
+
+void MotionController::setInvertY(bool invert) {
+    invertY = invert;
+}
+
+bool MotionController::getInvertX() const {
+    return invertX;
+}
+
+bool MotionController::getInvertY() const {
+    return invertY;
 }
 
