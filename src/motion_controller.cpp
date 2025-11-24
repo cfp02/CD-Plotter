@@ -122,8 +122,10 @@ bool MotionController::executeRapidMove(float x_mm, float y_mm) {
     
     // Execute moves (pen up for rapid move)
     penDown = false;
-    // Don't write to servo here - only update state
-    // Servo will be controlled by executePenUp/PenDown commands
+    // Ensure pen is up for rapid moves
+    if (penServo && !manualMode) {
+        penServo->write(penUpAngle);
+    }
     // TODO: Actual pen servo control here
     
     if (deltaX != 0) {
