@@ -1,0 +1,251 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8" />
+  <title>ESP32 Plotter - Stippling Web</title>
+  <style>
+    body { font-family: sans-serif; margin: 16px; }
+    .row { margin-bottom: 8px; }
+    label { display: inline-block; width: 150px; }
+    canvas { border: 1px solid #ccc; margin: 8px 0; }
+  </style>
+</head>
+<body>
+  <h1>ESP32 Plotter - Stippling Web</h1>
+
+  <div class="row">
+    <label>ESP32 IP:</label>
+    <input id="esp32_ip" type="text" value="192.168.1.185" />
+  </div>
+
+  <div class="row">
+    <label>Mode:</label>
+    <label><input type="radio" name="mode" value="image" checked /> Image</label>
+    <label><input type="radio" name="mode" value="text" /> Text</label>
+  </div>
+
+  <div class="row" id="imageRow">
+    <label>Image:</label>
+    <input id="imageInput" type="file" accept="image/*" />
+  </div>
+
+  <div class="row" id="textRow" style="display:none;">
+    <label>Text:</label>
+    <input id="textInput" type="text" placeholder="Hello world" />
+  </div>
+
+  <div class="row">
+    <label>Dot spacing (mm):</label>
+    <input id="spacing" type="range" min="0.5" max="3" step="0.1" value="1" />
+    <span id="spacingVal">1.0</span>
+  </div>
+
+  <div class="row">
+    <label>Pen dot size (mm):</label>
+    <input id="penSize" type="range" min="0.2" max="2" step="0.1" value="0.7" />
+    <span id="penSizeVal">0.7</span>
+  </div>
+
+  <div class="row">
+    <label>Contrast:</label>
+    <input id="contrast" type="range" min="0.5" max="2" step="0.1" value="1.0" />
+    <span id="contrastVal">1.0</span>
+  </div>
+
+  <div class="row">
+    <label>Brightness:</label>
+    <input id="brightness" type="range" min="0.5" max="1.5" step="0.1" value="1.0" />
+    <span id="brightnessVal">1.0</span>
+  </div>
+
+  <div class="row">
+    <label></label>
+    <label><input id="invert" type="checkbox" /> Invert (dark on light)</label>
+  </div>
+
+  <div class="row">
+    <label>Text size:</label>
+    <input id="textSize" type="range" min="20" max="100" step="2" value="40" />
+    <span id="textSizeVal">40</span>
+  </div>
+
+  <div class="row">
+    <button id="generateBtn">Generate Pattern</button>
+    <button id="sendBtn" disabled>Send to Plotter</button>
+    <button id="homeBtn">Home Plotter</button>
+  </div>
+
+  <div class="row">
+    <div>Status: <span id="status">Ready</span></div>
+  </div>
+
+  <canvas id="preview" width="500" height="500"></canvas>
+
+  <script>
+    const esp32Input  = document.getElementById('esp32_ip');
+    const imageInput  = document.getElementById('imageInput');
+    const textInput   = document.getElementById('textInput');
+    const spacing     = document.getElementById('spacing');
+    const spacingVal  = document.getElementById('spacingVal');
+    const penSize     = document.getElementById('penSize');
+    const penSizeVal  = document.getElementById('penSizeVal');
+    const contrast    = document.getElementById('contrast');
+    const contrastVal = document.getElementById('contrastVal');
+    const brightness  = document.getElementById('brightness');
+    const brightnessVal = document.getElementById('brightnessVal');
+    const invert      = document.getElementById('invert');
+    const textSize    = document.getElementById('textSize');
+    const textSizeVal = document.getElementById('textSizeVal');
+
+    const generateBtn = document.getElementById('generateBtn');
+    const sendBtn     = document.getElementById('sendBtn');
+    const homeBtn     = document.getElementById('homeBtn');
+    const statusEl    = document.getElementById('status');
+    const preview     = document.getElementById('preview');
+    const ctx         = preview.getContext('2d');
+
+    let currentDots   = [];
+    let currentArea   = null;
+
+    // Mode toggle
+    const imageRow = document.getElementById('imageRow');
+    const textRow  = document.getElementById('textRow');
+    document.querySelectorAll('input[name="mode"]').forEach(r => {
+      r.addEventListener('change', () => {
+        if (r.value === 'image' && r.checked) {
+          imageRow.style.display = '';
+          textRow.style.display = 'none';
+        } else if (r.value === 'text' && r.checked) {
+          imageRow.style.display = 'none';
+          textRow.style.display = '';
+        }
+      });
+    });
+
+    // Slider labels
+    spacing.addEventListener('input', () => spacingVal.textContent = spacing.value);
+    penSize.addEventListener('input', () => {
+      penSizeVal.textContent = penSize.value;
+      drawPreview(); // update physical dot size
+    });
+    contrast.addEventListener('input', () => contrastVal.textContent = contrast.value);
+    brightness.addEventListener('input', () => brightnessVal.textContent = brightness.value);
+    textSize.addEventListener('input', () => textSizeVal.textContent = textSize.value);
+
+    function getMode() {
+      return document.querySelector('input[name="mode"]:checked').value;
+    }
+
+    // Draw preview based on dots + work area + penSize
+    function drawPreview() {
+      ctx.clearRect(0, 0, preview.width, preview.height);
+
+      if (!currentDots.length || !currentArea) return;
+
+      const [minX, maxX, minY, maxY] = currentArea;
+      const widthMm  = maxX - minX;
+      const heightMm = maxY - minY;
+
+      if (widthMm <= 0 || heightMm <= 0) return;
+
+      const padding = 10;
+      const scaleX  = (preview.width  - 2*padding) / widthMm;
+      const scaleY  = (preview.height - 2*padding) / heightMm;
+      const scale   = Math.min(scaleX, scaleY);
+
+      const dotMm   = parseFloat(penSize.value);
+      const radius  = (dotMm * scale) / 2;
+
+      ctx.fillStyle = 'black';
+
+      for (const d of currentDots) {
+        const x = padding + (d.x - minX) * scale;
+        const y = padding + (d.y - minY) * scale;
+        ctx.beginPath();
+        ctx.arc(x, y, Math.max(radius, 0.5), 0, Math.PI*2);
+        ctx.fill();
+      }
+    }
+
+    generateBtn.addEventListener('click', async () => {
+      statusEl.textContent = 'Generating...';
+      sendBtn.disabled = true;
+
+      const formData = new FormData();
+      formData.append('esp32_ip', esp32Input.value);
+      formData.append('mode', getMode());
+      formData.append('spacing', spacing.value);
+      formData.append('contrast', contrast.value);
+      formData.append('brightness', brightness.value);
+      formData.append('invert', invert.checked ? 'true' : 'false');
+      formData.append('text_size', textSize.value);
+
+      if (getMode() === 'image') {
+        if (!imageInput.files.length) {
+          statusEl.textContent = 'Select an image first.';
+          return;
+        }
+        formData.append('image', imageInput.files[0]);
+      } else {
+        formData.append('text', textInput.value || '');
+      }
+
+      try {
+        const resp = await fetch('/generate', { method: 'POST', body: formData });
+        const data = await resp.json();
+        if (!resp.ok) {
+          statusEl.textContent = data.error || 'Generate failed';
+          return;
+        }
+
+        currentDots = data.dots || [];
+        currentArea = data.work_area || null;
+        statusEl.textContent = `Generated ${currentDots.length} dots`;
+        sendBtn.disabled = currentDots.length === 0;
+        drawPreview();
+      } catch (e) {
+        console.error(e);
+        statusEl.textContent = 'Error contacting server.';
+      }
+    });
+
+    sendBtn.addEventListener('click', async () => {
+      if (!currentDots.length) {
+        statusEl.textContent = 'No pattern to send.';
+        return;
+      }
+      statusEl.textContent = 'Sending to plotter...';
+
+      const formData = new FormData();
+      formData.append('esp32_ip', esp32Input.value);
+      formData.append('row_height_mm', spacing.value);
+      formData.append('dots', JSON.stringify(currentDots));
+
+      try {
+        const resp = await fetch('/send', { method: 'POST', body: formData });
+        const data = await resp.json();
+        if (data.ok) {
+          statusEl.textContent = 'Send complete!';
+        } else {
+          statusEl.textContent = 'Send failed.';
+        }
+      } catch (e) {
+        console.error(e);
+        statusEl.textContent = 'Error contacting server.';
+      }
+    });
+
+    homeBtn.addEventListener('click', async () => {
+      const formData = new FormData();
+      formData.append('esp32_ip', esp32Input.value);
+      try {
+        await fetch('/home', { method: 'POST', body: formData });
+        statusEl.textContent = 'Homing command sent.';
+      } catch (e) {
+        console.error(e);
+        statusEl.textContent = 'Error contacting server.';
+      }
+    });
+  </script>
+</body>
+</html>
