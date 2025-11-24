@@ -284,8 +284,8 @@ class StipplingGenerator:
                 rows.append((current_y, current_row))
 
             # Build commands
-            # Start at home with pen up (G0 automatically ensures pen is up)
-            commands.append("G0 X0 Y0")
+            # Start at home (H command moves to home position with pen up)
+            commands.append("H")
 
             serp = True
             for row_idx, (row_y, pts) in enumerate(rows):
@@ -299,20 +299,20 @@ class StipplingGenerator:
                     # Make dot (D command handles pen down, dwell, pen up automatically)
                     commands.append(f"D X{x:.2f} Y{y:.2f}")
 
-            # Return home with pen up (G0 automatically ensures pen is up)
-            commands.append("G0 X0 Y0")
+            # Return home (H command moves to home position with pen up)
+            commands.append("H")
 
         else:
             # Simple in-order path
-            # Start at home with pen up (G0 automatically ensures pen is up)
-            commands.append("G0 X0 Y0")
+            # Start at home (H command moves to home position with pen up)
+            commands.append("H")
             for x, y in dots:
                 # Move to position with pen up (G0 automatically ensures pen is up)
                 commands.append(f"G0 X{x:.2f} Y{y:.2f}")
                 # Make dot (D command handles pen down, dwell, pen up automatically)
                 commands.append(f"D X{x:.2f} Y{y:.2f}")
-            # Return home with pen up (G0 automatically ensures pen is up)
-            commands.append("G0 X0 Y0")
+            # Return home (H command moves to home position with pen up)
+            commands.append("H")
 
         return commands
 
