@@ -121,12 +121,22 @@ bool MotionController::executeRapidMove(float x_mm, float y_mm) {
     long deltaY = invertY ? -deltaY_raw : deltaY_raw;
     
     // Execute moves (pen up for rapid move)
-    penDown = false;
-    // Ensure pen is up for rapid moves
-    if (penServo && !manualMode) {
-        penServo->write(penUpAngle);
+    // Only change pen state and wait if it's actually changing
+    bool penStateChanged = false;
+    if (penDown) {
+        penDown = false;
+        penStateChanged = true;
+        // Ensure pen is up for rapid moves
+        if (penServo && !manualMode) {
+            penServo->write(penUpAngle);
+        }
     }
-    // TODO: Actual pen servo control here
+    
+    // Wait for pen to complete movement before starting stepper motion
+    // This prevents dragging the pen while it's still lowering/lifting
+    if (penStateChanged && !manualMode) {
+        delay(PEN_SERVO_DELAY_MS);
+    }
     
     if (deltaX != 0) {
         stepperX->move(deltaX);
@@ -171,10 +181,21 @@ bool MotionController::executeLinearMove(float x_mm, float y_mm) {
     long deltaY = invertY ? -deltaY_raw : deltaY_raw;
     
     // Execute moves (pen down for linear move)
-    penDown = true;
-    // Only write to servo if not in manual mode
-    if (penServo && !manualMode) {
-        penServo->write(penDownAngle);
+    // Only change pen state and wait if it's actually changing
+    bool penStateChanged = false;
+    if (!penDown) {
+        penDown = true;
+        penStateChanged = true;
+        // Only write to servo if not in manual mode
+        if (penServo && !manualMode) {
+            penServo->write(penDownAngle);
+        }
+    }
+    
+    // Wait for pen to complete movement before starting stepper motion
+    // This prevents dragging the pen while it's still lowering/lifting
+    if (penStateChanged && !manualMode) {
+        delay(PEN_SERVO_DELAY_MS);
     }
     
     if (deltaX != 0) {

@@ -1,12 +1,10 @@
 import requests
 import time
-from PIL import Image, ImageDraw, ImageFont, ImageOps
+import random
+from PIL import Image, ImageDraw, ImageFont
 import numpy as np
 import queue as thread_queue
 
-# =====================================================================
-# =======================  STIPPLING ENGINE  ==========================
-# =====================================================================
 
 class StipplingGenerator:
     def __init__(self, esp32_ip="192.168.1.185"):
@@ -73,7 +71,7 @@ class StipplingGenerator:
         return (0, 200, 0, 200)
 
     # ------------------------------------------------------------------
-    # Core stipple pipeline: PIL image → dots + (optional) processed img
+    # Core stipple pipeline: PIL image → dots + processed images
     # ------------------------------------------------------------------
 
     def _stippling_from_pil(
@@ -84,14 +82,18 @@ class StipplingGenerator:
         contrast=1.0,
         brightness=1.0,
         work_area=None,
+        mode="binary",        # "binary" (old behavior) or "density"
+        max_passes=3,         # max taps per cell in density mode
+        jitter_factor=0.3,    # fraction of dot_spacing for random jitter
     ):
         """
         Convert a PIL image to a list of dot positions in mm.
 
-        Returns (dots, work_area, bw_img)
+        Returns (dots, work_area, bw_img, processed_img)
         - dots: list[(x_mm, y_mm)]
         - work_area: (min_x, max_x, min_y, max_y)
-        - bw_img: dithered black & white PIL image (mainly for debugging)
+        - bw_img: dithered or density-preview image in pixel space
+        - processed_img: grayscale, contrast/brightness adjusted, resized
         """
         work_area = self._get_work_area(work_area)
         min_x, max_x, min_y, max_y = work_area
@@ -100,28 +102,43 @@ class StipplingGenerator:
 
         dot_spacing_mm = max(dot_spacing_mm, 0.2)
 
-        # Convert to grayscale
+        # ------------------------------------------------------------------
+        # 1) Convert to grayscale and compute aspect ratios
+        # ------------------------------------------------------------------
         img = img.convert("L")
         img_w, img_h = img.size
-        aspect = img_w / img_h if img_h else 1.0
+        aspect = img_w / img_h if img_h else 1.0          # image aspect (w/h)
 
-        # Grid size = physical size / dot spacing
-        grid_w = max(1, int(width_mm / dot_spacing_mm))
-        grid_h = max(1, int(height_mm / dot_spacing_mm))
+        area_aspect = width_mm / height_mm if height_mm else 1.0
 
-        # Fit to grid while preserving aspect ratio
-        if grid_w / grid_h > aspect:
-            target_h = grid_h
-            target_w = int(target_h * aspect)
+        # ------------------------------------------------------------------
+        # 2) Compute *physical* region the image will occupy (letterboxed)
+        #    - maintain aspect ratio
+        #    - keep dot spacing isotropic
+        # ------------------------------------------------------------------
+        if area_aspect > aspect:
+            # Work area is wider than image: image takes full height
+            phys_h = height_mm
+            phys_w = height_mm * aspect
         else:
-            target_w = grid_w
-            target_h = int(target_w / aspect)
+            # Work area is taller/narrower: image takes full width
+            phys_w = width_mm
+            phys_h = width_mm / aspect
 
-        target_w = max(1, target_w)
-        target_h = max(1, target_h)
-        img = img.resize((target_w, target_h), Image.Resampling.LANCZOS)
+        # Center image in work area (letterboxing)
+        offset_x_mm = min_x + (width_mm - phys_w) / 2.0
+        offset_y_mm = min_y + (height_mm - phys_h) / 2.0
 
-        # Apply contrast / brightness
+        # Grid size based on physical image area and dot spacing
+        grid_w = max(1, int(phys_w / dot_spacing_mm))
+        grid_h = max(1, int(phys_h / dot_spacing_mm))
+
+        # Resize image to grid resolution (this keeps sampling uniform)
+        img = img.resize((grid_w, grid_h), Image.Resampling.LANCZOS)
+
+        # ------------------------------------------------------------------
+        # 3) Apply contrast / brightness
+        # ------------------------------------------------------------------
         arr = np.array(img, dtype=np.float32)
         arr = (arr - 128.0) * float(contrast) + 128.0
         arr *= float(brightness)
@@ -130,25 +147,71 @@ class StipplingGenerator:
         if invert:
             arr = 255 - arr
 
-        proc = Image.fromarray(arr, mode="L")
+        # Keep a processed grayscale image (for preview)
+        processed_img = Image.fromarray(arr, mode="L")
 
-        # Floyd–Steinberg dithering -> binary (0/255)
-        bw = proc.convert("1", dither=Image.FLOYDSTEINBERG)
-        bw_arr = np.array(bw)
-
-        # Generate dots at cell centers where pixel is black
-        h, w = bw_arr.shape
         dots = []
-        for j in range(h):
-            for i in range(w):
-                if bw_arr[j, i] == 0:  # black
+
+        # ------------------------------------------------------------------
+        # 4) Convert tone → dots
+        # ------------------------------------------------------------------
+        if mode == "binary":
+            # Floyd–Steinberg dither -> binary image
+            bw = processed_img.convert("1", dither=Image.FLOYDSTEINBERG)
+            bw_arr = np.array(bw)
+
+            h, w = bw_arr.shape
+            for j in range(h):
+                for i in range(w):
+                    if bw_arr[j, i] == 0:  # black pixel -> one dot
+                        x_frac = (i + 0.5) / w
+                        y_frac = (j + 0.5) / h
+                        x_mm = offset_x_mm + x_frac * phys_w
+                        y_mm = offset_y_mm + y_frac * phys_h
+                        dots.append((x_mm, y_mm))
+
+        else:
+            # "density" mode: number of taps per cell based on darkness
+            h, w = arr.shape
+            bw = Image.new("L", (w, h), 255)
+            bw_px = bw.load()
+
+            max_passes = max(1, int(max_passes))
+            jitter_factor = float(jitter_factor)
+
+            for j in range(h):
+                for i in range(w):
+                    val = arr[j, i]  # 0 (black) .. 255 (white)
+                    darkness = 1.0 - (val / 255.0)  # 0=white, 1=black
+
+                    passes = int(round(darkness * max_passes))
+                    if passes <= 0:
+                        continue
+
+                    # For preview: darker pixel for more passes
+                    preview_val = int(255 * (1.0 - min(1.0, darkness)))
+                    bw_px[i, j] = preview_val
+
+                    # Base physical position: center of the cell
                     x_frac = (i + 0.5) / w
                     y_frac = (j + 0.5) / h
-                    x_mm = min_x + x_frac * width_mm
-                    y_mm = min_y + y_frac * height_mm
-                    dots.append((x_mm, y_mm))
+                    base_x = offset_x_mm + x_frac * phys_w
+                    base_y = offset_y_mm + y_frac * phys_h
 
-        return dots, work_area, bw, img
+                    # Generate multiple jittered dots
+                    for _ in range(passes):
+                        if jitter_factor > 0:
+                            jitter_mm = dot_spacing_mm * jitter_factor
+                            dx = (random.random() - 0.5) * jitter_mm
+                            dy = (random.random() - 0.5) * jitter_mm
+                        else:
+                            dx = dy = 0.0
+
+                        x_mm = min(max(base_x + dx, min_x), max_x)
+                        y_mm = min(max(base_y + dy, min_y), max_y)
+                        dots.append((x_mm, y_mm))
+
+        return dots, work_area, bw, processed_img
 
     # ------------------------------------------------------------------
     # Image file → stipple
@@ -162,17 +225,24 @@ class StipplingGenerator:
         contrast=1.0,
         brightness=1.0,
         work_area=None,
+        mode="binary",
+        max_passes=3,
+        jitter_factor=0.3,
     ):
         orig = Image.open(image_path).convert("RGB")
-        dots, area, bw = self._stippling_from_pil(
+        dots, area, bw, processed = self._stippling_from_pil(
             orig,
             dot_spacing_mm=dot_spacing_mm,
             invert=invert,
             contrast=contrast,
             brightness=brightness,
             work_area=work_area,
+            mode=mode,
+            max_passes=max_passes,
+            jitter_factor=jitter_factor,
         )
-        return dots, area, bw, orig
+        # You can return both processed and original if you want
+        return dots, area, bw, processed
 
     # ------------------------------------------------------------------
     # Text → stipple (render text to image first)
@@ -187,6 +257,9 @@ class StipplingGenerator:
         contrast=1.0,
         brightness=1.0,
         work_area=None,
+        mode="binary",
+        max_passes=3,
+        jitter_factor=0.3,
     ):
         work_area = self._get_work_area(work_area)
         min_x, max_x, min_y, max_y = work_area
@@ -217,16 +290,19 @@ class StipplingGenerator:
         y = (img_h - th) // 2
         draw.text((x, y), text, font=font, fill=0)
 
-        dots, area, bw = self._stippling_from_pil(
+        dots, area, bw, processed = self._stippling_from_pil(
             img,
             dot_spacing_mm=dot_spacing_mm,
             invert=invert,
             contrast=contrast,
             brightness=brightness,
             work_area=work_area,
+            mode=mode,
+            max_passes=max_passes,
+            jitter_factor=jitter_factor,
         )
 
-        return dots, area, bw, img.convert("RGB")
+        return dots, area, bw, processed
 
     # ------------------------------------------------------------------
     # Serpentine G-code generator
@@ -267,8 +343,7 @@ class StipplingGenerator:
             if current_row:
                 rows.append((current_y, current_row))
 
-            # Build commands
-            # Start at home (H command moves to home position with pen up)
+            # Start at home
             commands.append("H")
 
             serp = True
@@ -278,24 +353,16 @@ class StipplingGenerator:
                     pts_sorted.reverse()
 
                 for x, y in pts_sorted:
-                    # Move to position with pen up (G0 automatically ensures pen is up)
                     commands.append(f"G0 X{x:.2f} Y{y:.2f}")
-                    # Make dot (D command handles pen down, dwell, pen up automatically)
                     commands.append(f"D X{x:.2f} Y{y:.2f}")
 
-            # Return home (H command moves to home position with pen up)
             commands.append("H")
 
         else:
-            # Simple in-order path
-            # Start at home (H command moves to home position with pen up)
             commands.append("H")
             for x, y in dots:
-                # Move to position with pen up (G0 automatically ensures pen is up)
                 commands.append(f"G0 X{x:.2f} Y{y:.2f}")
-                # Make dot (D command handles pen down, dwell, pen up automatically)
                 commands.append(f"D X{x:.2f} Y{y:.2f}")
-            # Return home (H command moves to home position with pen up)
             commands.append("H")
 
         return commands
@@ -327,47 +394,39 @@ class StipplingGenerator:
         """
         gcode = self.generate_gcode(dots, row_height_mm=row_height_mm, serpentine=serpentine)
         total = len(gcode)
-        
+
         if total == 0:
             return True
-        
-        # Batch size: send 60 commands at a time (leave room in 100-size queue)
+
         BATCH_SIZE = 60
         sent = 0
-        
-        # Split into batches
+
         for i in range(0, total, BATCH_SIZE):
             batch = gcode[i:min(i + BATCH_SIZE, total)]
-            
-            # Wait for queue space (need at least BATCH_SIZE free slots)
+
             if not self.wait_for_queue_space(required=len(batch), max_wait=120):
                 print(f"Queue did not free up in time (batch {i//BATCH_SIZE + 1})")
                 return False
-            
-            # Send batch
+
             result = self.send_batch(batch)
             if result:
                 queued = result.get("queued", 0)
                 failed = result.get("failed", 0)
                 sent += queued
-                
+
                 if progress_callback:
                     progress_callback(sent, total)
-                
+
                 if failed > 0:
                     print(f"Warning: {failed} commands failed in batch")
-                    # Continue anyway - might be queue full, will retry next batch
-                
-                # Small delay between batches to let ESP32 process
+
                 time.sleep(0.1)
             else:
                 print(f"Failed to send batch {i//BATCH_SIZE + 1}")
                 return False
-        
-        # Wait for final commands to complete (optional - for progress tracking)
+
         if progress_callback:
-            # Give it a moment, then update final count
             time.sleep(0.5)
             progress_callback(sent, total)
-        
+
         return True

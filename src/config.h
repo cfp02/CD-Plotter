@@ -22,5 +22,9 @@
 // Dot command dwell time (milliseconds pen stays down for dot)
 #define DOT_DWELL_MS 50
 
+// Pen servo movement delay (milliseconds to wait for servo to complete movement)
+// This prevents starting movement before the pen has fully lifted or lowered
+#define PEN_SERVO_DELAY_MS 200
+
 #endif
 
