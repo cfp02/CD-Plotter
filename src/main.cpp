@@ -360,7 +360,7 @@ String getHTMLPage() {
   
   // Calibration Wizard
   html += "<div class=\"settings\" style=\"margin-top: 20px; background: #fff9c4;\">";
-  html += "<h2>🔧 Calibration Wizard</h2>";
+  html += "<h2>Calibration Wizard</h2>";
   html += "<div style=\"margin: 10px 0; padding: 10px; background: #fff; border-radius: 5px;\">";
   html += "<p style=\"margin: 5px 0;\"><strong>Step 1:</strong> Assign motors to axes</p>";
   html += "<div style=\"margin: 10px 0;\">";
