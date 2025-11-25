@@ -7,7 +7,7 @@ from flask import Flask, render_template, request, jsonify
 
 from PIL import Image, ImageDraw, ImageFont, ImageOps
 
-from stippling_generator import StipplingGenerator  # adjust if needed
+from stippling_engine import StipplingGenerator  # adjust if needed
 
 app = Flask(__name__)
 
