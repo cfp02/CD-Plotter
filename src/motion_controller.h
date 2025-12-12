@@ -2,15 +2,15 @@
 #define MOTION_CONTROLLER_H
 
 #include <Arduino.h>
-#include <AccelStepper.h>
 #include <ESP32Servo.h>
 #include "gcode_parser.h"
 #include "config.h"
+#include "drivers/stepper_driver.h"
 
 class MotionController {
 private:
-    AccelStepper* stepperX;
-    AccelStepper* stepperY;
+    StepperDriver* stepperX;
+    StepperDriver* stepperY;
     Servo* penServo;
     
     // Current position in mm
@@ -51,7 +51,7 @@ private:
     bool manualMode;
 
 public:
-    MotionController(AccelStepper* xStepper, AccelStepper* yStepper, Servo* servo);
+    MotionController(StepperDriver* xStepper, StepperDriver* yStepper, Servo* servo);
     
     void initialize();
     void setStepsPerMM(float x, float y);

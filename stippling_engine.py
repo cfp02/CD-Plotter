@@ -73,34 +73,40 @@ class StipplingGenerator:
     # ------------------------------------------------------------------
     # Core stipple pipeline: PIL image → dots + processed images
     # ------------------------------------------------------------------
-
+    
     def _stippling_from_pil(
         self,
         img,
         dot_spacing_mm=1.0,
+        pen_size_mm=0.3,
         invert=False,
         contrast=1.0,
         brightness=1.0,
         work_area=None,
-        mode="binary",        # "binary" (old behavior) or "density"
-        max_passes=3,         # max taps per cell in density mode
+        mode="binary",        # "binary", "density", "blue_noise"
+        max_passes=3,         # legacy knob; now mapped to layer passes
         jitter_factor=0.3,    # fraction of dot_spacing for random jitter
+        min_spacing_mm=None,  # for blue-noise/poisson mode
+        dot_budget=None,      # target number of dots for blue-noise
+        layer_passes=None,    # full-pattern repeats instead of per-cell taps
     ):
         """
         Convert a PIL image to a list of dot positions in mm.
 
-        Returns (dots, work_area, bw_img, processed_img)
+        Returns (dots, work_area, tone_img, processed_img, overlay_img)
         - dots: list[(x_mm, y_mm)]
         - work_area: (min_x, max_x, min_y, max_y)
-        - bw_img: dithered or density-preview image in pixel space
+        - tone_img: dithered or density-preview image in pixel space
         - processed_img: grayscale, contrast/brightness adjusted, resized
+        - overlay_img: high-res preview of dots in physical proportions
         """
         work_area = self._get_work_area(work_area)
         min_x, max_x, min_y, max_y = work_area
         width_mm = max_x - min_x
         height_mm = max_y - min_y
 
-        dot_spacing_mm = max(dot_spacing_mm, 0.2)
+        dot_spacing_mm = max(dot_spacing_mm, 0.05)
+        pen_size_mm = max(pen_size_mm, 0.05)
 
         # ------------------------------------------------------------------
         # 1) Convert to grayscale and compute aspect ratios
@@ -151,14 +157,17 @@ class StipplingGenerator:
         processed_img = Image.fromarray(arr, mode="L")
 
         dots = []
+        overlay_points = []
+        tone_img = None
 
         # ------------------------------------------------------------------
         # 4) Convert tone → dots
         # ------------------------------------------------------------------
+        effective_layers = max(1, int(layer_passes) if layer_passes is not None else int(max_passes))
         if mode == "binary":
-            # Floyd–Steinberg dither -> binary image
             bw = processed_img.convert("1", dither=Image.FLOYDSTEINBERG)
             bw_arr = np.array(bw)
+            tone_img = bw.convert("L")
 
             h, w = bw_arr.shape
             for j in range(h):
@@ -169,58 +178,117 @@ class StipplingGenerator:
                         x_mm = offset_x_mm + x_frac * phys_w
                         y_mm = offset_y_mm + y_frac * phys_h
                         dots.append((x_mm, y_mm))
+                        overlay_points.append((x_mm, y_mm, 1.0))
 
-        else:
-            # "density" mode: number of taps per cell based on darkness
+        elif mode == "density":
             h, w = arr.shape
             bw = Image.new("L", (w, h), 255)
             bw_px = bw.load()
+            tone_img = bw
 
-            max_passes = max(1, int(max_passes))
             jitter_factor = float(jitter_factor)
 
             for j in range(h):
                 for i in range(w):
-                    val = arr[j, i]  # 0 (black) .. 255 (white)
-                    darkness = 1.0 - (val / 255.0)  # 0=white, 1=black
+                    val = arr[j, i]
+                    darkness = 1.0 - (val / 255.0)
 
-                    passes = int(round(darkness * max_passes))
-                    if passes <= 0:
+                    if darkness <= 0.0:
                         continue
 
-                    # For preview: darker pixel for more passes
                     preview_val = int(255 * (1.0 - min(1.0, darkness)))
                     bw_px[i, j] = preview_val
 
-                    # Base physical position: center of the cell
                     x_frac = (i + 0.5) / w
                     y_frac = (j + 0.5) / h
                     base_x = offset_x_mm + x_frac * phys_w
                     base_y = offset_y_mm + y_frac * phys_h
 
-                    # Generate multiple jittered dots
-                    for _ in range(passes):
-                        if jitter_factor > 0:
-                            jitter_mm = dot_spacing_mm * jitter_factor
-                            dx = (random.random() - 0.5) * jitter_mm
-                            dy = (random.random() - 0.5) * jitter_mm
-                        else:
-                            dx = dy = 0.0
+                    if jitter_factor > 0:
+                        jitter_mm = dot_spacing_mm * jitter_factor
+                        dx = (random.random() - 0.5) * jitter_mm
+                        dy = (random.random() - 0.5) * jitter_mm
+                    else:
+                        dx = dy = 0.0
 
-                        x_mm = min(max(base_x + dx, min_x), max_x)
-                        y_mm = min(max(base_y + dy, min_y), max_y)
-                        dots.append((x_mm, y_mm))
+                    x_mm = min(max(base_x + dx, min_x), max_x)
+                    y_mm = min(max(base_y + dy, min_y), max_y)
+                    dots.append((x_mm, y_mm))
+                    overlay_points.append((x_mm, y_mm, max(1.0, darkness * effective_layers)))
 
-        return dots, work_area, bw, processed_img
+        else:
+            h, w = arr.shape
+            tone_img = processed_img
+
+            min_spacing = min_spacing_mm if min_spacing_mm is not None else dot_spacing_mm
+            min_spacing = max(0.05, float(min_spacing))
+            target_dots = int(dot_budget) if dot_budget is not None else 12000
+            target_dots = max(1, target_dots)
+
+            cell = min_spacing / (2 ** 0.5)
+            grid_w = max(1, int(phys_w / cell) + 2)
+            grid_h = max(1, int(phys_h / cell) + 2)
+            grid = [[None for _ in range(grid_w)] for _ in range(grid_h)]
+
+            def fits(x, y):
+                gx = int((x - min_x) / cell)
+                gy = int((y - min_y) / cell)
+                for yy in range(max(0, gy - 2), min(grid_h, gy + 3)):
+                    row = grid[yy]
+                    for xx in range(max(0, gx - 2), min(grid_w, gx + 3)):
+                        idx = row[xx]
+                        if idx is None:
+                            continue
+                        px, py = dots[idx]
+                        if (px - x) ** 2 + (py - y) ** 2 < min_spacing ** 2:
+                            return False
+                return True
+
+            def add_point(x, y):
+                gx = int((x - min_x) / cell)
+                gy = int((y - min_y) / cell)
+                grid[gy][gx] = len(dots)
+                dots.append((x, y))
+                overlay_points.append((x, y, 1.0))
+
+            max_trials = target_dots * 30
+            trials = 0
+            while len(dots) < target_dots and trials < max_trials:
+                trials += 1
+                rx = random.random()
+                ry = random.random()
+                x_mm = offset_x_mm + rx * phys_w
+                y_mm = offset_y_mm + ry * phys_h
+
+                ix = int(min(w - 1, max(0, rx * w)))
+                iy = int(min(h - 1, max(0, ry * h)))
+                darkness = 1.0 - (arr[iy, ix] / 255.0)
+
+                if random.random() > darkness:
+                    continue
+
+                if fits(x_mm, y_mm):
+                    add_point(x_mm, y_mm)
+
+        overlay_img = self._render_dot_overlay(
+            overlay_points or [(x, y, 1.0) for x, y in dots],
+            work_area=work_area,
+            pen_size_mm=pen_size_mm,
+            target_size=(900, 900),
+            oversample=3,
+        )
+
+        return dots, work_area, tone_img, processed_img, overlay_img, effective_layers
 
     # ------------------------------------------------------------------
-    # Image file → stipple
+    # Image file -> stipple
     # ------------------------------------------------------------------
 
     def image_to_stippling(
         self,
         image_path,
         dot_spacing_mm=1.0,
+        pen_size_mm=0.3,
         invert=False,
         contrast=1.0,
         brightness=1.0,
@@ -230,9 +298,10 @@ class StipplingGenerator:
         jitter_factor=0.3,
     ):
         orig = Image.open(image_path).convert("RGB")
-        dots, area, bw, processed = self._stippling_from_pil(
+        dots, area, tone_img, processed, overlay, layers = self._stippling_from_pil(
             orig,
             dot_spacing_mm=dot_spacing_mm,
+            pen_size_mm=pen_size_mm,
             invert=invert,
             contrast=contrast,
             brightness=brightness,
@@ -240,9 +309,10 @@ class StipplingGenerator:
             mode=mode,
             max_passes=max_passes,
             jitter_factor=jitter_factor,
+            layer_passes=None,
         )
         # You can return both processed and original if you want
-        return dots, area, bw, processed
+        return dots, area, tone_img, processed, overlay, layers
 
     # ------------------------------------------------------------------
     # Text → stipple (render text to image first)
@@ -253,6 +323,7 @@ class StipplingGenerator:
         text,
         font_size=40,
         dot_spacing_mm=1.0,
+        pen_size_mm=0.3,
         invert=False,
         contrast=1.0,
         brightness=1.0,
@@ -290,9 +361,10 @@ class StipplingGenerator:
         y = (img_h - th) // 2
         draw.text((x, y), text, font=font, fill=0)
 
-        dots, area, bw, processed = self._stippling_from_pil(
+        dots, area, tone_img, processed, overlay, layers = self._stippling_from_pil(
             img,
             dot_spacing_mm=dot_spacing_mm,
+            pen_size_mm=pen_size_mm,
             invert=invert,
             contrast=contrast,
             brightness=brightness,
@@ -300,24 +372,94 @@ class StipplingGenerator:
             mode=mode,
             max_passes=max_passes,
             jitter_factor=jitter_factor,
+            layer_passes=None,
         )
 
-        return dots, area, bw, processed
+        return dots, area, tone_img, processed, overlay, layers
+
+    # ------------------------------------------------------------------
+    # Preview rendering helper
+    # ------------------------------------------------------------------
+
+    def _render_dot_overlay(
+        self,
+        dots,
+        work_area,
+        pen_size_mm=0.7,
+        target_size=(900, 900),
+        oversample=3,
+        margin_px=12,
+    ):
+        """
+        Render a high-res preview of dots scaled to the physical work area.
+        Uses alpha to allow stacked dots to accumulate darkness.
+        """
+        if not dots or not work_area:
+            return Image.new("RGB", target_size, "white")
+
+        min_x, max_x, min_y, max_y = work_area
+        width_mm = max_x - min_x
+        height_mm = max_y - min_y
+
+        if width_mm <= 0 or height_mm <= 0:
+            return Image.new("RGB", target_size, "white")
+
+        base_w, base_h = target_size
+        canvas_w = max(1, int(base_w * oversample))
+        canvas_h = max(1, int(base_h * oversample))
+
+        scale_x = (canvas_w - 2 * margin_px) / width_mm
+        scale_y = (canvas_h - 2 * margin_px) / height_mm
+        scale = min(scale_x, scale_y)
+
+        offset_x = margin_px
+        offset_y = margin_px
+
+        base_radius = max(0.25, (float(pen_size_mm) * scale) / 3.0)
+        base_alpha = 80  # semi-transparent so dense areas build up darkness
+
+        out = Image.new("RGBA", (canvas_w, canvas_h), (255, 255, 255, 0))
+        draw = ImageDraw.Draw(out, "RGBA")
+
+        for x_mm, y_mm, weight in dots:
+            cx = offset_x + (x_mm - min_x) * scale
+            cy = offset_y + (y_mm - min_y) * scale
+            w = max(1.0, float(weight))
+            radius_px = base_radius * (0.7 + 0.3 * (w ** 0.5))
+            alpha = int(min(200, base_alpha * (0.5 + 0.5 * (w / 3.0))))
+            bbox = [
+                cx - radius_px,
+                cy - radius_px,
+                cx + radius_px,
+                cy + radius_px,
+            ]
+            draw.ellipse(bbox, fill=(0, 0, 0, alpha), outline=None)
+
+        if oversample > 1:
+            out = out.resize(target_size, Image.Resampling.LANCZOS)
+
+        # Composite over white for final RGB preview
+        rgb = Image.new("RGB", target_size, "white")
+        rgb.paste(out, mask=out.split()[-1])
+        return rgb
 
     # ------------------------------------------------------------------
     # Serpentine G-code generator
     # ------------------------------------------------------------------
 
-    def generate_gcode(self, dots, row_height_mm=None, serpentine=True):
+    def generate_gcode(self, dots, row_height_mm=None, serpentine=True, layer_passes=1):
         """
         Generate G-code with optional serpentine rastering.
         - dots: list[(x_mm, y_mm)]
         - row_height_mm: approximate spacing between rows (for clustering)
         - serpentine: if True, alternate left→right / right→left each row
+        - layer_passes: repeat full pattern this many times
         """
         commands = []
         if not dots:
             return commands
+
+        layer_passes = max(1, int(layer_passes or 1))
 
         # Serpentine path: group dots by Y rows, then order X forward/back
         if serpentine and row_height_mm is not None:
@@ -343,27 +485,27 @@ class StipplingGenerator:
             if current_row:
                 rows.append((current_y, current_row))
 
-            # Start at home
-            commands.append("H")
+            for _ in range(layer_passes):
+                commands.append("H")
+                serp = True
+                for row_idx, (row_y, pts) in enumerate(rows):
+                    pts_sorted = sorted(pts, key=lambda p: p[0])
+                    if serp and (row_idx % 2 == 1):
+                        pts_sorted.reverse()
 
-            serp = True
-            for row_idx, (row_y, pts) in enumerate(rows):
-                pts_sorted = sorted(pts, key=lambda p: p[0])
-                if serp and (row_idx % 2 == 1):
-                    pts_sorted.reverse()
+                    for x, y in pts_sorted:
+                        commands.append(f"G0 X{x:.2f} Y{y:.2f}")
+                        commands.append(f"D X{x:.2f} Y{y:.2f}")
 
-                for x, y in pts_sorted:
-                    commands.append(f"G0 X{x:.2f} Y{y:.2f}")
-                    commands.append(f"D X{x:.2f} Y{y:.2f}")
-
-            commands.append("H")
+                commands.append("H")
 
         else:
-            commands.append("H")
-            for x, y in dots:
-                commands.append(f"G0 X{x:.2f} Y{y:.2f}")
-                commands.append(f"D X{x:.2f} Y{y:.2f}")
-            commands.append("H")
+            for _ in range(layer_passes):
+                commands.append("H")
+                for x, y in dots:
+                    commands.append(f"G0 X{x:.2f} Y{y:.2f}")
+                    commands.append(f"D X{x:.2f} Y{y:.2f}")
+                commands.append("H")
 
         return commands
 
@@ -387,12 +529,12 @@ class StipplingGenerator:
             print(f"Error sending batch: {e}")
         return None
 
-    def send_pattern(self, dots, progress_callback=None, row_height_mm=None, serpentine=True):
+    def send_pattern(self, dots, progress_callback=None, row_height_mm=None, serpentine=True, layer_passes=1):
         """
         Send stippling pattern using efficient batch uploads.
         Splits G-code into chunks and sends via /uploadgcode endpoint.
         """
-        gcode = self.generate_gcode(dots, row_height_mm=row_height_mm, serpentine=serpentine)
+        gcode = self.generate_gcode(dots, row_height_mm=row_height_mm, serpentine=serpentine, layer_passes=layer_passes)
         total = len(gcode)
 
         if total == 0:

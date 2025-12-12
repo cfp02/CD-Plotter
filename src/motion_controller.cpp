@@ -1,6 +1,6 @@
 #include "motion_controller.h"
 
-MotionController::MotionController(AccelStepper* xStepper, AccelStepper* yStepper, Servo* servo) {
+MotionController::MotionController(StepperDriver* xStepper, StepperDriver* yStepper, Servo* servo) {
     stepperX = xStepper;
     stepperY = yStepper;
     penServo = servo;

@@ -1,5 +1,4 @@
 #include <Arduino.h>
-#include <AccelStepper.h>
 #include <WiFi.h>
 #include <WebServer.h>
 #include <Preferences.h>
@@ -9,6 +8,23 @@
 // Copy wifi_config.h.example to wifi_config.h and fill in your credentials
 #include "wifi_config.h"
 
+// Hardware configuration (selected via build flags)
+#ifdef BOARD_ESP32_DEVKIT
+    #include "hardware/pin_config_esp32dev.h"
+#elif defined(BOARD_XIAO_ESP32S3)
+    // Will be added when TMC2209 support is implemented
+    // #include "hardware/pin_config_xiao_esp32s3.h"
+#endif
+
+// Driver selection (via build flags)
+#ifdef DRIVER_TB6612
+    #include "drivers/tb6612_driver.h"
+    #include <AccelStepper.h>  // For step mode constants
+#elif defined(DRIVER_TMC2209)
+    // Will be added when TMC2209 support is implemented
+    // #include "drivers/tmc2209_driver.h"
+#endif
+
 // G-code interpreter modules
 #include "config.h"
 #include "gcode_parser.h"
@@ -17,60 +33,28 @@
 #include "plotter_state.h"
 #include "serial_interface.h"
 
+// Driver interface
+#include "drivers/stepper_driver.h"
+
 // Web server on port 80
 WebServer server(80);
 
-// TB6612FNG Pin Definitions for Stepper Motor 1
-// Motor A (Coil 1)
-#define MOTOR1_AIN1 14  // GPIO14 - Motor A Input 1
-#define MOTOR1_AIN2 12  // GPIO12 - Motor A Input 2
-#define MOTOR1_PWMA 13  // GPIO13 - Motor A PWM (power control)
-
-// Motor B (Coil 2)
-#define MOTOR1_BIN1 27  // GPIO27 - Motor B Input 1
-#define MOTOR1_BIN2 26  // GPIO26 - Motor B Input 2
-#define MOTOR1_PWMB 19  // GPIO19 - Motor B PWM (power control)
-
-// TB6612FNG Pin Definitions for Stepper Motor 2
-// Motor A (Coil 1)
-#define MOTOR2_AIN1 33  // GPIO33 - Motor A Input 1 (NOTE: GPIO33 is input-only, but can work for some ESP32 variants)
-#define MOTOR2_AIN2 25  // GPIO25 - Motor A Input 2
-#define MOTOR2_PWMA 23  // GPIO23 - Motor A PWM (power control)
-
-// Motor B (Coil 2)
-// WARNING: GPIO32 and GPIO35 are INPUT-ONLY and cannot be used as outputs!
-// You MUST change these to output-capable pins (e.g., GPIO4, GPIO5, GPIO16, GPIO17)
-#define MOTOR2_BIN1 4   // GPIO4 - Motor B Input 1 (CHANGE THIS - was GPIO32)
-#define MOTOR2_BIN2 5   // GPIO5 - Motor B Input 2 (CHANGE THIS - was GPIO35)
-#define MOTOR2_PWMB 22  // GPIO22 - Motor B PWM (power control)
-
-// Servo pin for pen control
-#define SERVO_PIN 18    // GPIO18 - Servo control pin for pen up/down
+// Servo for pen control
 Servo penServo;
-
-// STBY pins are tied directly to 3.3V (not controlled by ESP32)
-
-// PWM settings for ESP32
-#define PWM_FREQUENCY 20000  // 20 kHz (ultrasonic - above human hearing ~20 kHz)
-#define PWM_RESOLUTION 8  // 8-bit resolution (0-255)
-// Use channels 4-7 for motors to avoid conflict with ESP32Servo (which uses channels 0-3)
-#define PWM_CHANNEL_M1A 4
-#define PWM_CHANNEL_M1B 5
-#define PWM_CHANNEL_M2A 6
-#define PWM_CHANNEL_M2B 7
-
-// Motor power settings (0-255, lower = less heat but less torque)
-#define MOTOR_POWER_RUNNING 180  // Power when moving (70% - reduces heat)
-#define MOTOR_POWER_HOLDING 120  // Power when holding position (47% - much less heat)
 
 // Preferences for persistent storage
 Preferences preferences;
 
 // Step mode: FULL4WIRE = full step, HALF4WIRE = half step
 // Half step provides smoother motion and more precision but uses more power
-// Must be declared before stepper objects
 // Default to HALF4WIRE (half step)
-int stepMode = AccelStepper::HALF4WIRE;  // Default to half step
+#ifdef DRIVER_TB6612
+    int stepMode = AccelStepper::HALF4WIRE;  // Default to half step
+#elif defined(DRIVER_TMC2209)
+    // TMC2209 uses microstepping via UART, not hardware step mode
+    // This will be handled differently when implemented
+    int stepMode = 0;  // Placeholder
+#endif
 
 // Motor parameters (adjustable at runtime via web interface)
 float maxSpeed = 1000.0;          // Maximum speed in steps per second
@@ -85,54 +69,68 @@ int penDownAngle = 90;            // Servo angle for pen down (0-180 degrees)
 unsigned long dotDwellMs = 50;    // Dwell time for dot command (milliseconds)
 int currentServoAngle = 0;        // Track current servo position to maintain it
 unsigned long lastServoWrite = 0; // Track when servo was last written
-// Manual mode is handled by motionController.setManualMode() - no need for separate flag
 
-// AccelStepper setup - mode will be set dynamically
-// Motor 1
-AccelStepper stepper1(stepMode, 
-                      MOTOR1_AIN1, MOTOR1_AIN2, 
-                      MOTOR1_BIN1, MOTOR1_BIN2);
+// ====================================================================
+// Driver Instances (selected via build flags)
+// ====================================================================
+#ifdef DRIVER_TB6612
+    // TB6612FNG drivers using AccelStepper
+    TB6612Driver stepper1_driver(stepMode,
+                                  MOTOR1_AIN1, MOTOR1_AIN2,
+                                  MOTOR1_BIN1, MOTOR1_BIN2,
+                                  MOTOR1_PWMA, MOTOR1_PWMB,
+                                  PWM_CHANNEL_M1A, PWM_CHANNEL_M1B);
+    
+    TB6612Driver stepper2_driver(stepMode,
+                                  MOTOR2_AIN1, MOTOR2_AIN2,
+                                  MOTOR2_BIN1, MOTOR2_BIN2,
+                                  MOTOR2_PWMA, MOTOR2_PWMB,
+                                  PWM_CHANNEL_M2A, PWM_CHANNEL_M2B);
+#elif defined(DRIVER_TMC2209)
+    // TMC2209 drivers (to be implemented)
+    // TMC2209Driver stepper1_driver(...);
+    // TMC2209Driver stepper2_driver(...);
+    #error "TMC2209 driver not yet implemented"
+#endif
 
-// Motor 2
-AccelStepper stepper2(stepMode, 
-                      MOTOR2_AIN1, MOTOR2_AIN2, 
-                      MOTOR2_BIN1, MOTOR2_BIN2);
+// Driver pointers for motion controller
+StepperDriver* stepper1 = &stepper1_driver;
+StepperDriver* stepper2 = &stepper2_driver;
 
 // G-code interpreter system
 CommandQueue commandQueue;
 PlotterStateMachine stateMachine;
-MotionController motionController(&stepper1, &stepper2, &penServo);
+MotionController motionController(stepper1, stepper2, &penServo);
 SerialInterface serialInterface(&commandQueue);
 
-// Function to set motor power via PWM
+// Function to set motor power (delegates to drivers)
 void setMotorPower(int power) {
-  // Clamp power to 0-255 range
-  if (power > 255) power = 255;
-  if (power < 0) power = 0;
-  
-  ledcWrite(PWM_CHANNEL_M1A, power);
-  ledcWrite(PWM_CHANNEL_M1B, power);
-  ledcWrite(PWM_CHANNEL_M2A, power);
-  ledcWrite(PWM_CHANNEL_M2B, power);
+  stepper1->setPower(power);
+  stepper2->setPower(power);
 }
 
 // Function to update motor speed and acceleration settings
 void updateMotorSettings() {
-  stepper1.setMaxSpeed(maxSpeed);
-  stepper1.setAcceleration(acceleration);
-  stepper2.setMaxSpeed(maxSpeed);
-  stepper2.setAcceleration(acceleration);
+  stepper1->setMaxSpeed(maxSpeed);
+  stepper1->setAcceleration(acceleration);
+  stepper2->setMaxSpeed(maxSpeed);
+  stepper2->setAcceleration(acceleration);
 }
 
 // Function to change step mode (requires reinitializing steppers)
 void changeStepMode(int newMode) {
   stepMode = newMode;
-  // Note: AccelStepper objects are already created, but the mode is set at construction
-  // For a proper mode change, we'd need to recreate them, but that's complex
-  // Instead, we'll just update the mode variable and note it in serial
-  Serial.print("Step mode changed to: ");
-  Serial.println((newMode == AccelStepper::HALF4WIRE) ? "HALF STEP" : "FULL STEP");
-  Serial.println("NOTE: Step mode change requires restart to take full effect.");
+  #ifdef DRIVER_TB6612
+    // Note: AccelStepper objects are already created, but the mode is set at construction
+    // For a proper mode change, we'd need to recreate them, but that's complex
+    // Instead, we'll just update the mode variable and note it in serial
+    Serial.print("Step mode changed to: ");
+    Serial.println((newMode == AccelStepper::HALF4WIRE) ? "HALF STEP" : "FULL STEP");
+    Serial.println("NOTE: Step mode change requires restart to take full effect.");
+  #elif defined(DRIVER_TMC2209)
+    // TMC2209 microstepping is configured via UART, not hardware step mode
+    Serial.println("TMC2209 microstepping configured via UART (not yet implemented)");
+  #endif
 }
 
 // Function to generate HTML page
@@ -292,15 +290,19 @@ String getHTMLPage() {
   html += "</div>";
   html += "<div class=\"settings-row\">";
   html += "<label>Step Mode:</label>";
-  // Set the default selected option based on current step mode
-  String stepModeSelected = (stepMode == AccelStepper::HALF4WIRE) ? "selected" : "";
-  String fullStepSelected = (stepMode == AccelStepper::FULL4WIRE) ? "selected" : "";
-  html += "<select id=\"stepMode\" style=\"padding: 8px; margin: 5px; width: 150px;\">";
-  html += "<option value=\"full\" " + fullStepSelected + ">Full Step</option>";
-  html += "<option value=\"half\" " + stepModeSelected + ">Half Step</option>";
-  html += "</select>";
-  html += "<button onclick=\"setStepMode()\">Set</button>";
-  html += "<span style=\"margin-left: 10px; color: #666; font-size: 0.9em;\">(Requires restart)</span>";
+  #ifdef DRIVER_TB6612
+    // Set the default selected option based on current step mode
+    String stepModeSelected = (stepMode == AccelStepper::HALF4WIRE) ? "selected" : "";
+    String fullStepSelected = (stepMode == AccelStepper::FULL4WIRE) ? "selected" : "";
+    html += "<select id=\"stepMode\" style=\"padding: 8px; margin: 5px; width: 150px;\">";
+    html += "<option value=\"full\" " + fullStepSelected + ">Full Step</option>";
+    html += "<option value=\"half\" " + stepModeSelected + ">Half Step</option>";
+    html += "</select>";
+    html += "<button onclick=\"setStepMode()\">Set</button>";
+    html += "<span style=\"margin-left: 10px; color: #666; font-size: 0.9em;\">(Requires restart)</span>";
+  #elif defined(DRIVER_TMC2209)
+    html += "<span style=\"color: #666;\">TMC2209: Microstepping configured via UART (1/16 default)</span>";
+  #endif
   html += "</div>";
   html += "</div>";
   
@@ -893,9 +895,9 @@ void handleMove() {
     long pos = server.arg("pos").toInt();
     
     if (motor == 1) {
-      stepper1.moveTo(pos);
+      stepper1->moveTo(pos);
     } else if (motor == 2) {
-      stepper2.moveTo(pos);
+      stepper2->moveTo(pos);
     }
     
     server.send(200, "text/plain", "OK");
@@ -910,9 +912,9 @@ void handleMoveRel() {
     long steps = server.arg("steps").toInt();
     
     if (motor == 1) {
-      stepper1.move(steps);
+      stepper1->move(steps);
     } else if (motor == 2) {
-      stepper2.move(steps);
+      stepper2->move(steps);
     }
     
     server.send(200, "text/plain", "OK");
@@ -926,9 +928,9 @@ void handleStop() {
     int motor = server.arg("motor").toInt();
     
     if (motor == 1) {
-      stepper1.stop();
+      stepper1->stop();
     } else if (motor == 2) {
-      stepper2.stop();
+      stepper2->stop();
     }
     
     server.send(200, "text/plain", "OK");
@@ -938,8 +940,8 @@ void handleStop() {
 }
 
 void handleStopAll() {
-  stepper1.stop();
-  stepper2.stop();
+  stepper1->stop();
+  stepper2->stop();
   server.send(200, "text/plain", "OK");
 }
 
@@ -948,9 +950,9 @@ void handleSetHome() {
     int motor = server.arg("motor").toInt();
     
     if (motor == 1) {
-      stepper1.setCurrentPosition(0);
+      stepper1->setCurrentPosition(0);
     } else if (motor == 2) {
-      stepper2.setCurrentPosition(0);
+      stepper2->setCurrentPosition(0);
     }
     
     server.send(200, "text/plain", "OK");
@@ -960,22 +962,22 @@ void handleSetHome() {
 }
 
 void handleHomeAll() {
-  stepper1.moveTo(0);
-  stepper2.moveTo(0);
+  stepper1->moveTo(0);
+  stepper2->moveTo(0);
   server.send(200, "text/plain", "OK");
 }
 
 void handleStatus() {
   String json = "{";
   json += "\"motor1\":{";
-  json += "\"position\":" + String(stepper1.currentPosition()) + ",";
-  json += "\"target\":" + String(stepper1.targetPosition()) + ",";
-  json += "\"speed\":" + String(stepper1.speed());
+  json += "\"position\":" + String(stepper1->currentPosition()) + ",";
+  json += "\"target\":" + String(stepper1->targetPosition()) + ",";
+  json += "\"speed\":" + String(stepper1->speed());
   json += "},";
   json += "\"motor2\":{";
-  json += "\"position\":" + String(stepper2.currentPosition()) + ",";
-  json += "\"target\":" + String(stepper2.targetPosition()) + ",";
-  json += "\"speed\":" + String(stepper2.speed());
+  json += "\"position\":" + String(stepper2->currentPosition()) + ",";
+  json += "\"target\":" + String(stepper2->targetPosition()) + ",";
+  json += "\"speed\":" + String(stepper2->speed());
   json += "}";
   json += "}";
   
@@ -1041,7 +1043,7 @@ void handleSetPower() {
       Serial.print("Holding power set to: ");
       Serial.println(motorPowerHolding);
       // If motors are currently stopped, update power immediately
-      if (!stepper1.isRunning() && !stepper2.isRunning()) {
+      if (!stepper1->isRunning() && !stepper2->isRunning()) {
         setMotorPower(motorPowerHolding);
       }
     }
@@ -1190,28 +1192,33 @@ void handleTestPen() {
 }
 
 void handleSetStepMode() {
-  if (server.hasArg("mode")) {
-    String mode = server.arg("mode");
-    int newMode;
-    if (mode == "half") {
-      newMode = AccelStepper::HALF4WIRE;
-      Serial.println("Step mode set to HALF STEP (requires restart)");
+  #ifdef DRIVER_TB6612
+    if (server.hasArg("mode")) {
+      String mode = server.arg("mode");
+      int newMode;
+      if (mode == "half") {
+        newMode = AccelStepper::HALF4WIRE;
+        Serial.println("Step mode set to HALF STEP (requires restart)");
+      } else {
+        newMode = AccelStepper::FULL4WIRE;
+        Serial.println("Step mode set to FULL STEP (requires restart)");
+      }
+      
+      // Save to preferences
+      preferences.begin("motor", false);  // Read-write mode
+      preferences.putInt("stepMode", newMode);
+      preferences.end();
+      
+      stepMode = newMode;  // Update current value
+      
+      server.send(200, "text/plain", "OK");
     } else {
-      newMode = AccelStepper::FULL4WIRE;
-      Serial.println("Step mode set to FULL STEP (requires restart)");
+      server.send(400, "text/plain", "Bad Request");
     }
-    
-    // Save to preferences
-    preferences.begin("motor", false);  // Read-write mode
-    preferences.putInt("stepMode", newMode);
-    preferences.end();
-    
-    stepMode = newMode;  // Update current value
-    
-    server.send(200, "text/plain", "OK");
-  } else {
-    server.send(400, "text/plain", "Bad Request");
-  }
+  #elif defined(DRIVER_TMC2209)
+    // TMC2209 microstepping is configured via UART, not via web interface yet
+    server.send(200, "text/plain", "TMC2209 microstepping not yet configurable via web");
+  #endif
 }
 
 void handleGcode() {
@@ -1734,13 +1741,22 @@ void setup() {
   Serial.begin(115200);
   delay(1000);
   
-  Serial.println("ESP32 Stepper Motor Control with TB6612FNG");
-  Serial.println("Using AccelStepper library");
+  #ifdef DRIVER_TB6612
+    Serial.println("ESP32 Stepper Motor Control with TB6612FNG");
+    Serial.println("Using AccelStepper library");
+  #elif defined(DRIVER_TMC2209)
+    Serial.println("ESP32-S3 XIAO Stepper Motor Control with TMC2209");
+    Serial.println("Using TMCStepper library");
+  #endif
   Serial.println("Initializing...");
   
   // Load motor settings from preferences (must be done before stepper objects are used)
   preferences.begin("motor", true);  // Read-only mode
-  int savedMode = preferences.getInt("stepMode", AccelStepper::HALF4WIRE);
+  #ifdef DRIVER_TB6612
+    int savedMode = preferences.getInt("stepMode", AccelStepper::HALF4WIRE);
+  #elif defined(DRIVER_TMC2209)
+    int savedMode = 0;  // TMC2209 doesn't use AccelStepper step modes
+  #endif
   float savedMaxSpeed = preferences.getFloat("maxSpeed", 1000.0);
   float savedAcceleration = preferences.getFloat("acceleration", 1000.0);
   int savedPowerRunning = preferences.getInt("powerRunning", 250);
@@ -1755,9 +1771,14 @@ void setup() {
   preferences.end();
   
   // Update stepMode if a saved value exists
-  if (savedMode == AccelStepper::FULL4WIRE || savedMode == AccelStepper::HALF4WIRE) {
-    stepMode = savedMode;
-  }
+  #ifdef DRIVER_TB6612
+    if (savedMode == AccelStepper::FULL4WIRE || savedMode == AccelStepper::HALF4WIRE) {
+      stepMode = savedMode;
+    }
+  #elif defined(DRIVER_TMC2209)
+    // TMC2209 step mode is handled via UART configuration
+    stepMode = savedMode;  // Placeholder
+  #endif
   
   // Load saved speed and power settings
   maxSpeed = savedMaxSpeed;
@@ -1766,21 +1787,18 @@ void setup() {
   motorPowerHolding = savedPowerHolding;
   
   Serial.print("Step mode loaded: ");
-  Serial.println((stepMode == AccelStepper::HALF4WIRE) ? "HALF STEP" : "FULL STEP");
+  #ifdef DRIVER_TB6612
+    Serial.println((stepMode == AccelStepper::HALF4WIRE) ? "HALF STEP" : "FULL STEP");
+  #elif defined(DRIVER_TMC2209)
+    Serial.println("TMC2209 (microstepping via UART)");
+  #endif
   
   // STBY pins are tied directly to 3.3V (not controlled by ESP32)
   // No need to configure them in code
   
-  // Configure PWM channels for motor power control
-  ledcSetup(PWM_CHANNEL_M1A, PWM_FREQUENCY, PWM_RESOLUTION);
-  ledcSetup(PWM_CHANNEL_M1B, PWM_FREQUENCY, PWM_RESOLUTION);
-  ledcSetup(PWM_CHANNEL_M2A, PWM_FREQUENCY, PWM_RESOLUTION);
-  ledcSetup(PWM_CHANNEL_M2B, PWM_FREQUENCY, PWM_RESOLUTION);
-  
-  ledcAttachPin(MOTOR1_PWMA, PWM_CHANNEL_M1A);
-  ledcAttachPin(MOTOR1_PWMB, PWM_CHANNEL_M1B);
-  ledcAttachPin(MOTOR2_PWMA, PWM_CHANNEL_M2A);
-  ledcAttachPin(MOTOR2_PWMB, PWM_CHANNEL_M2B);
+  // Initialize stepper drivers (handles PWM/UART setup internally)
+  stepper1->begin();
+  stepper2->begin();
   
   // Set initial motor power (will be adjusted based on motion state)
   setMotorPower(motorPowerHolding);
@@ -1801,10 +1819,10 @@ void setup() {
   Serial.print(penDownAngle);
   Serial.println("°");
   
-  // Configure AccelStepper for both motors
+  // Configure motor settings (drivers already initialized above)
   updateMotorSettings();
-  stepper1.setCurrentPosition(0);
-  stepper2.setCurrentPosition(0);
+  stepper1->setCurrentPosition(0);
+  stepper2->setCurrentPosition(0);
   
   // Initialize motion controller (pass pen settings)
   motionController.initialize();
@@ -1917,10 +1935,10 @@ void loop() {
   // Update motion controller (handles dot dwell timing)
   motionController.update();
   
-  // AccelStepper must be called as often as possible for smooth motion
+  // Stepper drivers must be called as often as possible for smooth motion
   // This is non-blocking and handles acceleration/deceleration automatically
-  stepper1.run();
-  stepper2.run();
+  stepper1->run();
+  stepper2->run();
   
   // G-code command execution
   static Command currentCommand;
@@ -2010,8 +2028,8 @@ void loop() {
           
         case '!':
           // Emergency stop
-          stepper1.stop();
-          stepper2.stop();
+          stepper1->stop();
+          stepper2->stop();
           stateMachine.emergencyStop();
           serialInterface.sendOK();
           commandInProgress = false;
@@ -2047,7 +2065,7 @@ void loop() {
   
   // Check if current command has completed
   if (commandInProgress && stateMachine.getState() == STATE_MOVING) {
-    if (!motionController.isMoving() && !stepper1.isRunning() && !stepper2.isRunning()) {
+    if (!motionController.isMoving() && !stepper1->isRunning() && !stepper2->isRunning()) {
       // Command completed
       serialInterface.sendOK();
       commandInProgress = false;
@@ -2059,8 +2077,8 @@ void loop() {
   // Increase power when moving, reduce when stopped/holding
   static unsigned long lastPowerCheck = 0;
   if (millis() - lastPowerCheck > 100) {  // Check every 100ms
-    bool motor1Running = stepper1.isRunning();
-    bool motor2Running = stepper2.isRunning();
+    bool motor1Running = stepper1->isRunning();
+    bool motor2Running = stepper2->isRunning();
     
     if (motor1Running || motor2Running) {
       // At least one motor is moving - use running power

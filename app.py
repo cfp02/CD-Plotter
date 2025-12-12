@@ -18,6 +18,7 @@ CURRENT_DOTS = None
 CURRENT_WORK_AREA = None
 CURRENT_DOT_SPACING = None
 CURRENT_PEN_SIZE = None
+CURRENT_LAYER_PASSES = None
 
 # For safety if multiple requests come in at once
 STATE_LOCK = threading.Lock()
@@ -67,7 +68,7 @@ def render_text_to_image(text, width_px=1200, height_px=800, font_size=120):
     return img
 
 
-def build_stipple_preview(dots, work_area, pen_size_mm, img_size=(800, 800)):
+def build_stipple_preview(dots, work_area, pen_size_mm, img_size=(800, 800), oversample=3):
     """
     Create a preview image with dots drawn at the correct relative scale,
     similar to the Tkinter preview.
@@ -76,6 +77,8 @@ def build_stipple_preview(dots, work_area, pen_size_mm, img_size=(800, 800)):
         return Image.new("RGB", img_size, "white")
 
     w_px, h_px = img_size
+    w_draw = w_px * max(1, int(oversample))
+    h_draw = h_px * max(1, int(oversample))
     min_x, max_x, min_y, max_y = work_area
     width_mm = max_x - min_x
     height_mm = max_y - min_y
@@ -84,19 +87,19 @@ def build_stipple_preview(dots, work_area, pen_size_mm, img_size=(800, 800)):
         return Image.new("RGB", img_size, "white")
 
     # Leave small margins
-    scale_x = (w_px - 20) / width_mm
-    scale_y = (h_px - 20) / height_mm
+    scale_x = (w_draw - 20) / width_mm
+    scale_y = (h_draw - 20) / height_mm
     scale = min(scale_x, scale_y)
 
     offset_x = 10
     offset_y = 10
 
     # Convert pen size in mm to pixel radius
-    radius_px = (float(pen_size_mm) * scale) / 2.0
-    radius_px = max(radius_px, 0.5)
+    radius_px = max(0.25, (float(pen_size_mm) * scale) / 3.0)
+    alpha = 90
 
-    out = Image.new("RGB", (w_px, h_px), "white")
-    draw = ImageDraw.Draw(out)
+    out = Image.new("RGBA", (w_draw, h_draw), (255, 255, 255, 0))
+    draw = ImageDraw.Draw(out, "RGBA")
 
     for x_mm, y_mm in dots:
         cx = offset_x + (x_mm - min_x) * scale
@@ -107,9 +110,14 @@ def build_stipple_preview(dots, work_area, pen_size_mm, img_size=(800, 800)):
             cx + radius_px,
             cy + radius_px,
         ]
-        draw.ellipse(bbox, fill="black", outline="black")
+        draw.ellipse(bbox, fill=(0, 0, 0, alpha), outline=None)
 
-    return out
+    if oversample > 1:
+        out = out.resize((w_px, h_px), Image.Resampling.LANCZOS)
+
+    rgb = Image.new("RGB", (w_px, h_px), "white")
+    rgb.paste(out, mask=out.split()[-1])
+    return rgb
 
 # ---------------------------------------------------------------------
 # Routes
@@ -139,6 +147,7 @@ def generate():
         dot_spacing_mm = float(request.form.get("dot_spacing_mm", "1.0"))
     except ValueError:
         dot_spacing_mm = 1.0
+    dot_spacing_mm = max(0.05, dot_spacing_mm)
 
     try:
         contrast = float(request.form.get("contrast", "1.0"))
@@ -158,21 +167,35 @@ def generate():
         text_size = 40.0
 
     try:
-        pen_size_mm = float(request.form.get("pen_size_mm", "0.7"))
+        pen_size_mm = float(request.form.get("pen_size_mm", "0.3"))
     except ValueError:
-        pen_size_mm = 0.7
+        pen_size_mm = 0.3
+    pen_size_mm = max(0.05, pen_size_mm)
 
     # New knobs
     mode = request.form.get("mode", "binary")  # "binary" or "density"
     try:
-        max_passes = int(request.form.get("max_passes", "3"))
+        layer_passes = int(request.form.get("max_passes", "1"))
     except ValueError:
-        max_passes = 3
+        layer_passes = 1
+    layer_passes = max(1, layer_passes)
 
     try:
         jitter_factor = float(request.form.get("jitter", "0.3"))
     except ValueError:
         jitter_factor = 0.3
+
+    try:
+        min_spacing_mm = float(request.form.get("min_spacing_mm", str(dot_spacing_mm)))
+    except ValueError:
+        min_spacing_mm = dot_spacing_mm
+    min_spacing_mm = max(0.05, min_spacing_mm)
+
+    try:
+        dot_budget = int(request.form.get("dot_budget", "12000"))
+    except ValueError:
+        dot_budget = 12000
+    dot_budget = max(1, dot_budget)
 
     # Input: either image upload or text
     img = None
@@ -203,16 +226,20 @@ def generate():
 
     try:
         # Call your enhanced stippling engine
-        dots, work_area, bw_img, processed_img = gen._stippling_from_pil(
+        dots, work_area, tone_img, processed_img, overlay_img, layer_passes_eff = gen._stippling_from_pil(
             img,
             dot_spacing_mm=dot_spacing_mm,
+            pen_size_mm=pen_size_mm,
             invert=invert,
             contrast=contrast,
             brightness=brightness,
             work_area=None,           # or a fixed tuple if you want
             mode=mode,
-            max_passes=max_passes,
+            max_passes=layer_passes,
             jitter_factor=jitter_factor,
+            min_spacing_mm=min_spacing_mm,
+            dot_budget=dot_budget,
+            layer_passes=layer_passes,
         )
     except TypeError as e:
         # This usually means _stippling_from_pil doesn't have the new args yet
@@ -229,26 +256,43 @@ def generate():
     orig_preview = ImageOps.contain(orig_img_for_preview, (600, 400))
     orig_b64 = pil_to_base64_png(orig_preview)
 
-    # 2) Stipple preview with physically scaled dots
+    # 2) Processed grayscale preview
+    proc_preview = ImageOps.contain(processed_img.convert("RGB"), (600, 400))
+    proc_b64 = pil_to_base64_png(proc_preview)
+
+    # 3) Tone map (binary/density) preview
+    tone_preview = ImageOps.contain(tone_img.convert("RGB"), (600, 400))
+    tone_b64 = pil_to_base64_png(tone_preview)
+
+    # 4) High-res dot overlay preview
+    overlay_preview = ImageOps.contain(overlay_img.convert("RGB"), (600, 400))
+    overlay_b64 = pil_to_base64_png(overlay_preview)
+
+    # 5) Stipple preview with physically scaled dots
     stipple_preview = build_stipple_preview(
         dots,
         work_area,
         pen_size_mm=pen_size_mm,
         img_size=(600, 400),
+        oversample=3,
     )
     stipple_b64 = pil_to_base64_png(stipple_preview)
 
     with STATE_LOCK:
-        global CURRENT_DOTS, CURRENT_WORK_AREA, CURRENT_DOT_SPACING, CURRENT_PEN_SIZE
+        global CURRENT_DOTS, CURRENT_WORK_AREA, CURRENT_DOT_SPACING, CURRENT_PEN_SIZE, CURRENT_LAYER_PASSES
         CURRENT_DOTS = dots
         CURRENT_WORK_AREA = work_area
         CURRENT_DOT_SPACING = dot_spacing_mm
         CURRENT_PEN_SIZE = pen_size_mm
+        CURRENT_LAYER_PASSES = layer_passes_eff
 
     return jsonify({
         "success": True,
         "dots_count": len(dots),
         "preview_original": orig_b64,
+        "preview_processed": proc_b64,
+        "preview_tone": tone_b64,
+        "preview_overlay": overlay_b64,
         "preview_stipple": stipple_b64,
     })
 
@@ -269,6 +313,7 @@ def send_to_plotter():
 
     with STATE_LOCK:
         dots = CURRENT_DOTS
+        layer_passes = CURRENT_LAYER_PASSES or 1
 
     if not dots:
         return jsonify({
@@ -283,6 +328,7 @@ def send_to_plotter():
         progress_callback=None,  # you could add streaming progress later
         row_height_mm=dot_spacing_mm,
         serpentine=True,
+        layer_passes=layer_passes,
     )
 
     if ok:
