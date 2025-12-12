@@ -54,19 +54,21 @@ void TB6612Driver::stop() {
 }
 
 long TB6612Driver::currentPosition() const {
-    return stepper.currentPosition();
+    // AccelStepper methods are not const, but we need const interface
+    // Use const_cast to work around this limitation
+    return const_cast<AccelStepper&>(stepper).currentPosition();
 }
 
 long TB6612Driver::targetPosition() const {
-    return stepper.targetPosition();
+    return const_cast<AccelStepper&>(stepper).targetPosition();
 }
 
 bool TB6612Driver::isRunning() const {
-    return stepper.isRunning();
+    return const_cast<AccelStepper&>(stepper).isRunning();
 }
 
 float TB6612Driver::speed() const {
-    return stepper.speed();
+    return const_cast<AccelStepper&>(stepper).speed();
 }
 
 void TB6612Driver::setCurrentPosition(long position) {

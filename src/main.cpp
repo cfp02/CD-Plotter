@@ -12,8 +12,7 @@
 #ifdef BOARD_ESP32_DEVKIT
     #include "hardware/pin_config_esp32dev.h"
 #elif defined(BOARD_XIAO_ESP32S3)
-    // Will be added when TMC2209 support is implemented
-    // #include "hardware/pin_config_xiao_esp32s3.h"
+    #include "hardware/pin_config_xiao_esp32s3.h"
 #endif
 
 // Driver selection (via build flags)
@@ -21,8 +20,9 @@
     #include "drivers/tb6612_driver.h"
     #include <AccelStepper.h>  // For step mode constants
 #elif defined(DRIVER_TMC2209)
-    // Will be added when TMC2209 support is implemented
-    // #include "drivers/tmc2209_driver.h"
+    #include "drivers/tmc2209_driver.h"
+    #include <AccelStepper.h>  // Used by TMC2209Driver for motion control
+    #include <HardwareSerial.h>  // For UART communication
 #endif
 
 // G-code interpreter modules
@@ -87,10 +87,15 @@ unsigned long lastServoWrite = 0; // Track when servo was last written
                                   MOTOR2_PWMA, MOTOR2_PWMB,
                                   PWM_CHANNEL_M2A, PWM_CHANNEL_M2B);
 #elif defined(DRIVER_TMC2209)
-    // TMC2209 drivers (to be implemented)
-    // TMC2209Driver stepper1_driver(...);
-    // TMC2209Driver stepper2_driver(...);
-    #error "TMC2209 driver not yet implemented"
+    // Shared UART for both TMC2209 drivers
+    HardwareSerial tmcUart(TMC_UART_NUM);
+    
+    // TMC2209 drivers with shared UART
+    TMC2209Driver stepper1_driver(MOTOR1_STEP, MOTOR1_DIR, MOTOR_EN,
+                                   &tmcUart, TMC2209_ADDRESS_MOTOR1, TMC2209_RSENSE);
+    
+    TMC2209Driver stepper2_driver(MOTOR2_STEP, MOTOR2_DIR, MOTOR_EN,
+                                   &tmcUart, TMC2209_ADDRESS_MOTOR2, TMC2209_RSENSE);
 #endif
 
 // Driver pointers for motion controller
@@ -894,10 +899,33 @@ void handleMove() {
     int motor = server.arg("motor").toInt();
     long pos = server.arg("pos").toInt();
     
+    Serial.print("Move command: Motor ");
+    Serial.print(motor);
+    Serial.print(" to position ");
+    Serial.println(pos);
+    
     if (motor == 1) {
       stepper1->moveTo(pos);
+      Serial.print("Motor 1: current=");
+      Serial.print(stepper1->currentPosition());
+      Serial.print(" target=");
+      Serial.println(stepper1->targetPosition());
     } else if (motor == 2) {
       stepper2->moveTo(pos);
+      Serial.print("Motor 2: current=");
+      Serial.print(stepper2->currentPosition());
+      Serial.print(" target=");
+      Serial.println(stepper2->targetPosition());
+    } else {
+      server.send(400, "text/plain", "Invalid motor number");
+      return;
+    }
+    
+    // Ensure motor is enabled
+    if (motor == 1) {
+      stepper1->enable();
+    } else {
+      stepper2->enable();
     }
     
     server.send(200, "text/plain", "OK");
@@ -911,10 +939,34 @@ void handleMoveRel() {
     int motor = server.arg("motor").toInt();
     long steps = server.arg("steps").toInt();
     
+    Serial.print("Move relative: Motor ");
+    Serial.print(motor);
+    Serial.print(" by ");
+    Serial.print(steps);
+    Serial.println(" steps");
+    
     if (motor == 1) {
       stepper1->move(steps);
+      Serial.print("Motor 1: current=");
+      Serial.print(stepper1->currentPosition());
+      Serial.print(" target=");
+      Serial.println(stepper1->targetPosition());
     } else if (motor == 2) {
       stepper2->move(steps);
+      Serial.print("Motor 2: current=");
+      Serial.print(stepper2->currentPosition());
+      Serial.print(" target=");
+      Serial.println(stepper2->targetPosition());
+    } else {
+      server.send(400, "text/plain", "Invalid motor number");
+      return;
+    }
+    
+    // Ensure motor is enabled
+    if (motor == 1) {
+      stepper1->enable();
+    } else {
+      stepper2->enable();
     }
     
     server.send(200, "text/plain", "OK");
@@ -962,8 +1014,25 @@ void handleSetHome() {
 }
 
 void handleHomeAll() {
+  Serial.println("Home All: Moving both motors to position 0");
+  
+  // Enable both motors
+  stepper1->enable();
+  stepper2->enable();
+  
+  // Move both to home (0,0)
   stepper1->moveTo(0);
   stepper2->moveTo(0);
+  
+  Serial.print("Motor 1: current=");
+  Serial.print(stepper1->currentPosition());
+  Serial.print(" target=");
+  Serial.println(stepper1->targetPosition());
+  Serial.print("Motor 2: current=");
+  Serial.print(stepper2->currentPosition());
+  Serial.print(" target=");
+  Serial.println(stepper2->targetPosition());
+  
   server.send(200, "text/plain", "OK");
 }
 
@@ -1796,6 +1865,17 @@ void setup() {
   // STBY pins are tied directly to 3.3V (not controlled by ESP32)
   // No need to configure them in code
   
+  #ifdef DRIVER_TMC2209
+    // Initialize shared UART for TMC2209 drivers
+    // Must be done before driver begin() calls
+    tmcUart.begin(TMC_UART_BAUD, SERIAL_8N1, TMC_UART_RX, TMC_UART_TX);
+    delay(100);  // Give UART time to initialize
+    Serial.print("TMC2209 UART initialized on RX=");
+    Serial.print(TMC_UART_RX);
+    Serial.print(" TX=");
+    Serial.println(TMC_UART_TX);
+  #endif
+  
   // Initialize stepper drivers (handles PWM/UART setup internally)
   stepper1->begin();
   stepper2->begin();
@@ -1820,9 +1900,18 @@ void setup() {
   Serial.println("°");
   
   // Configure motor settings (drivers already initialized above)
+  // IMPORTANT: Set speed and acceleration BEFORE any movement commands
   updateMotorSettings();
+  
+  // Initialize positions to 0
   stepper1->setCurrentPosition(0);
   stepper2->setCurrentPosition(0);
+  
+  // Ensure motors are enabled (especially important for TMC2209)
+  stepper1->enable();
+  stepper2->enable();
+  
+  Serial.println("Motors initialized and enabled");
   
   // Initialize motion controller (pass pen settings)
   motionController.initialize();
