@@ -19,6 +19,7 @@ private:
     int pwmChannelB;
     int currentPower;
     bool enabled;
+    int stepMode;  // Track step mode for microstepping query
     
     // PWM settings
     static constexpr int PWM_FREQUENCY = 20000;  // 20 kHz (ultrasonic)
@@ -62,6 +63,8 @@ public:
     void disable() override;
     
     void begin() override;
+    
+    int getMicrostepping() const override;
 };
 
 #endif // TB6612_DRIVER_H

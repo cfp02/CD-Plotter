@@ -86,6 +86,8 @@ public:
     void setCurrent(int runCurrent_mA, int holdCurrent_mA);
     void setStealthChop(bool enable);  // Silent operation mode
     void setSpreadCycle(bool enable);  // High torque mode
+    
+    int getMicrostepping() const override;
 };
 
 #endif // TMC2209_DRIVER_H

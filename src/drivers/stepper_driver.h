@@ -116,6 +116,16 @@ public:
      * Must be called once in setup() before use
      */
     virtual void begin() = 0;
+    
+    // ====================================================================
+    // Microstepping Query
+    // ====================================================================
+    
+    /**
+     * Get current microstepping setting
+     * @return Microstepping multiplier (1, 2, 4, 8, 16, 32, etc.)
+     */
+    virtual int getMicrostepping() const = 0;
 };
 
 #endif // STEPPER_DRIVER_H

@@ -61,7 +61,11 @@ float maxSpeed = 1000.0;          // Maximum speed in steps per second
 float acceleration = 1000.0;       // Acceleration in steps per second squared
 int motorPowerRunning = 250;      // Power when moving (0-255, ~98%)
 int motorPowerHolding = 120;      // Power when holding (0-255, 47%)
-#define STEPS_PER_REV 20          // Steps per revolution (CD drive steppers)
+
+// Mechanical parameters (for calibration)
+int fullStepsPerRev = 20;         // Full steps per revolution (CD drive steppers)
+float linearTravelPerRev = 3.0;   // Linear travel per revolution in mm (3mm pitch)
+// Microstepping is queried from driver (16 for TMC2209, 1-2 for TB6612)
 
 // Pen control parameters (adjustable at runtime via web interface)
 int penUpAngle = 0;               // Servo angle for pen up (0-180 degrees)
@@ -122,6 +126,18 @@ void updateMotorSettings() {
   stepper2->setAcceleration(acceleration);
 }
 
+// Helper functions for mechanical parameter calculations
+float calculateFullStepsPerMM() {
+  if (linearTravelPerRev <= 0) return 0.0;
+  return (float)fullStepsPerRev / linearTravelPerRev;
+}
+
+float calculateMicrostepsPerMM(char axis) {
+  float fullStepsPerMM = calculateFullStepsPerMM();
+  int microstepping = (axis == 'X') ? stepper1->getMicrostepping() : stepper2->getMicrostepping();
+  return fullStepsPerMM * (float)microstepping;
+}
+
 // Function to change step mode (requires reinitializing steppers)
 void changeStepMode(int newMode) {
   stepMode = newMode;
@@ -167,65 +183,53 @@ String getHTMLPage() {
   // Status message area
   html += "<div id=\"statusMessage\" style=\"display: none; padding: 10px; margin: 10px 0; border-radius: 5px; background: #4CAF50; color: white; text-align: center; font-weight: bold;\"></div>";
   
-  // Settings section
+  // Mechanical Parameters section
   html += "<div class=\"settings\">";
-  html += "<h2>Plotter Configuration</h2>";
+  html += "<h2>Mechanical Parameters</h2>";
+  
+  // Get microstepping from drivers
+  int microsteppingX = stepper1->getMicrostepping();
+  int microsteppingY = stepper2->getMicrostepping();
+  float fullStepsPerMM = calculateFullStepsPerMM();
+  float microstepsPerMM_X = calculateMicrostepsPerMM('X');
+  float microstepsPerMM_Y = calculateMicrostepsPerMM('Y');
+  
   html += "<div class=\"settings-row\">";
-  html += "<label>Steps per mm (X):</label>";
-  html += "<input type=\"number\" id=\"stepsPerMM_X\" value=\"" + String(motionController.getStepsPerMM_X(), 2) + "\" min=\"0.1\" max=\"100\" step=\"0.1\">";
-  html += "<button onclick=\"setStepsPerMM('X')\">Set</button>";
-  html += "</div>";
-  html += "<div class=\"settings-row\">";
-  html += "<label>Steps per mm (Y):</label>";
-  html += "<input type=\"number\" id=\"stepsPerMM_Y\" value=\"" + String(motionController.getStepsPerMM_Y(), 2) + "\" min=\"0.1\" max=\"100\" step=\"0.1\">";
-  html += "<button onclick=\"setStepsPerMM('Y')\">Set</button>";
-  html += "</div>";
-  html += "<div class=\"settings-row\">";
-  html += "<label>Work Area - Min X (mm):</label>";
-  html += "<input type=\"number\" id=\"minX\" value=\"" + String(motionController.getMinX(), 1) + "\" min=\"-1000\" max=\"1000\" step=\"1\">";
-  html += "<button onclick=\"setWorkArea()\">Set</button>";
+  html += "<label>Full Steps per Revolution:</label>";
+  html += "<input type=\"number\" id=\"fullStepsPerRev\" value=\"" + String(fullStepsPerRev) + "\" min=\"1\" max=\"200\" step=\"1\">";
+  html += "<button onclick=\"setFullStepsPerRev()\">Set</button>";
   html += "</div>";
   html += "<div class=\"settings-row\">";
-  html += "<label>Work Area - Max X (mm):</label>";
-  html += "<input type=\"number\" id=\"maxX\" value=\"" + String(motionController.getMaxX(), 1) + "\" min=\"-1000\" max=\"1000\" step=\"1\">";
+  html += "<label>Linear Travel per Revolution (mm):</label>";
+  html += "<input type=\"number\" id=\"linearTravelPerRev\" value=\"" + String(linearTravelPerRev, 2) + "\" min=\"0.1\" max=\"100\" step=\"0.1\">";
+  html += "<button onclick=\"setLinearTravelPerRev()\">Set</button>";
+  html += "</div>";
+  html += "<div class=\"settings-row\" style=\"background: #f5f5f5; padding: 10px; border-radius: 5px; margin: 10px 0;\">";
+  html += "<div style=\"margin: 5px 0;\"><strong>Microstepping:</strong> X-axis: <span id=\"microsteppingX\">" + String(microsteppingX) + "x</span> | Y-axis: <span id=\"microsteppingY\">" + String(microsteppingY) + "x</span> (auto-detected)</div>";
+  html += "<div style=\"margin: 5px 0;\"><strong>Calculated Full Steps/mm:</strong> " + String(fullStepsPerMM, 3) + "</div>";
+  html += "<div style=\"margin: 5px 0;\"><strong>Calculated Microsteps/mm:</strong> X: " + String(microstepsPerMM_X, 3) + " | Y: " + String(microstepsPerMM_Y, 3) + "</div>";
   html += "</div>";
   html += "<div class=\"settings-row\">";
-  html += "<label>Work Area - Min Y (mm):</label>";
-  html += "<input type=\"number\" id=\"minY\" value=\"" + String(motionController.getMinY(), 1) + "\" min=\"-1000\" max=\"1000\" step=\"1\">";
+  html += "<label>Full Steps/mm (X) - Override:</label>";
+  html += "<input type=\"number\" id=\"fullStepsPerMM_X\" value=\"" + String(fullStepsPerMM, 3) + "\" min=\"0.1\" max=\"100\" step=\"0.001\">";
+  html += "<button onclick=\"setFullStepsPerMM('X')\">Set</button>";
+  html += "<span style=\"margin-left: 10px; color: #666; font-size: 0.9em;\">(Leave empty to use calculated value)</span>";
   html += "</div>";
   html += "<div class=\"settings-row\">";
-  html += "<label>Work Area - Max Y (mm):</label>";
-  html += "<input type=\"number\" id=\"maxY\" value=\"" + String(motionController.getMaxY(), 1) + "\" min=\"-1000\" max=\"1000\" step=\"1\">";
-  html += "</div>";
-  html += "<div class=\"settings-row\" style=\"margin-top: 15px; padding-top: 15px; border-top: 1px solid #ccc;\">";
-  html += "<label>Set Limits at Current Position:</label>";
-  html += "<div style=\"display: inline-block; margin-left: 10px;\">";
-  html += "<button onclick=\"setLimit('X', 'min')\" style=\"padding: 5px 10px; margin: 2px;\">Set Min X</button>";
-  html += "<button onclick=\"setLimit('X', 'max')\" style=\"padding: 5px 10px; margin: 2px;\">Set Max X</button>";
-  html += "<button onclick=\"setLimit('Y', 'min')\" style=\"padding: 5px 10px; margin: 2px;\">Set Min Y</button>";
-  html += "<button onclick=\"setLimit('Y', 'max')\" style=\"padding: 5px 10px; margin: 2px;\">Set Max Y</button>";
+  html += "<label>Full Steps/mm (Y) - Override:</label>";
+  html += "<input type=\"number\" id=\"fullStepsPerMM_Y\" value=\"" + String(fullStepsPerMM, 3) + "\" min=\"0.1\" max=\"100\" step=\"0.001\">";
+  html += "<button onclick=\"setFullStepsPerMM('Y')\">Set</button>";
+  html += "<span style=\"margin-left: 10px; color: #666; font-size: 0.9em;\">(Leave empty to use calculated value)</span>";
   html += "</div>";
   html += "</div>";
-  html += "<div class=\"settings-row\" style=\"margin-top: 15px; padding-top: 15px; border-top: 1px solid #ccc; background: #fff9c4;\">";
-  html += "<label style=\"font-weight: bold;\">Physical Calibration (Measure with calipers):</label>";
-  html += "<div style=\"margin-top: 10px;\">";
-  html += "<div style=\"margin: 5px 0;\">";
-  html += "<label>Measured X Width (mm):</label>";
-  html += "<input type=\"number\" id=\"measuredXWidth\" value=\"" + String(motionController.getMaxX() - motionController.getMinX(), 2) + "\" min=\"0.1\" max=\"1000\" step=\"0.1\" style=\"width: 100px; margin-left: 10px;\">";
-  html += "<button onclick=\"calibrateFromPhysical('X')\" style=\"padding: 5px 15px; margin-left: 10px; background: #4CAF50; color: white;\">Calculate Steps/mm</button>";
-  html += "</div>";
-  html += "<div style=\"margin: 5px 0;\">";
-  html += "<label>Measured Y Height (mm):</label>";
-  html += "<input type=\"number\" id=\"measuredYHeight\" value=\"" + String(motionController.getMaxY() - motionController.getMinY(), 2) + "\" min=\"0.1\" max=\"1000\" step=\"0.1\" style=\"width: 100px; margin-left: 10px;\">";
-  html += "<button onclick=\"calibrateFromPhysical('Y')\" style=\"padding: 5px 15px; margin-left: 10px; background: #4CAF50; color: white;\">Calculate Steps/mm</button>";
-  html += "</div>";
-  html += "<div style=\"margin-top: 10px; padding: 8px; background: #e8f5e9; border-radius: 5px; font-size: 0.9em;\">";
-  html += "<strong>How to use:</strong><br>";
-  html += "1. Measure the physical width/height of your work area with calipers<br>";
-  html += "2. Enter the measured value above<br>";
-  html += "3. Click 'Calculate Steps/mm' - this will automatically calculate the correct steps/mm<br>";
-  html += "4. The work area limits will be updated to match your measurements";
-  html += "</div>";
+  
+  // Work Area Display (read-only, calculated from step limits)
+  html += "<div class=\"settings\">";
+  html += "<h2>Work Area</h2>";
+  html += "<div class=\"settings-row\" style=\"background: #e8f5e9; padding: 10px; border-radius: 5px;\">";
+  html += "<div style=\"margin: 5px 0;\"><strong>X Range:</strong> <span id=\"workAreaX\">" + String(motionController.getMinX(), 1) + " to " + String(motionController.getMaxX(), 1) + " mm</span> (Width: " + String(motionController.getMaxX() - motionController.getMinX(), 1) + " mm)</div>";
+  html += "<div style=\"margin: 5px 0;\"><strong>Y Range:</strong> <span id=\"workAreaY\">" + String(motionController.getMinY(), 1) + " to " + String(motionController.getMaxY(), 1) + " mm</span> (Height: " + String(motionController.getMaxY() - motionController.getMinY(), 1) + " mm)</div>";
+  html += "<div style=\"margin: 5px 0; font-size: 0.9em; color: #666;\">Work area is calculated from step limits and steps/mm. Use calibration below to set limits.</div>";
   html += "</div>";
   html += "</div>";
   html += "<div class=\"settings-row\" style=\"margin-top: 15px; padding-top: 15px; border-top: 1px solid #ccc;\">";
@@ -365,60 +369,69 @@ String getHTMLPage() {
   html += "<button onclick=\"homeAll()\" style=\"background: #2196F3;\">Home All (Move to 0,0)</button>";
   html += "</div>";
   
-  // Calibration Wizard
+  // Simplified Calibration (Jog to Limits)
   html += "<div class=\"settings\" style=\"margin-top: 20px; background: #fff9c4;\">";
-  html += "<h2>Calibration Wizard</h2>";
+  html += "<h2>Calibration - Set Work Area Limits</h2>";
   html += "<div style=\"margin: 10px 0; padding: 10px; background: #fff; border-radius: 5px;\">";
-  html += "<p style=\"margin: 5px 0;\"><strong>Step 1:</strong> Assign motors to axes</p>";
+  html += "<p style=\"margin: 5px 0;\"><strong>Instructions:</strong> Jog each axis to its physical limits and click the corresponding button to set that limit.</p>";
+  html += "<div style=\"margin: 15px 0; padding: 15px; background: #e8f5e9; border-radius: 5px;\">";
+  
+  // X-Axis Calibration
+  html += "<div style=\"margin: 10px 0; padding: 10px; background: #fff; border-radius: 5px;\">";
+  html += "<h3 style=\"margin-top: 0;\">X-Axis</h3>";
   html += "<div style=\"margin: 10px 0;\">";
-  html += "<label>Motor 1 is: </label>";
-  html += "<select id=\"motor1Axis\" style=\"padding: 5px; margin: 0 5px;\">";
-  html += "<option value=\"X\">X-Axis</option>";
-  html += "<option value=\"Y\">Y-Axis</option>";
-  html += "</select>";
-  html += "<span style=\"margin-left: 10px;\">Motor 2 is: </span>";
-  html += "<span id=\"motor2Axis\" style=\"font-weight: bold;\">Y-Axis</span>";
-  html += "</div>";
-  html += "<p style=\"margin: 5px 0;\"><strong>Step 2:</strong> Find limits for each axis</p>";
-  html += "<div style=\"margin: 10px 0;\">";
-  html += "<label>Calibrating: </label>";
-  html += "<select id=\"calAxis\" style=\"padding: 5px; margin: 0 5px;\">";
-  html += "<option value=\"X\">X-Axis</option>";
-  html += "<option value=\"Y\">Y-Axis</option>";
-  html += "</select>";
-  html += "<button onclick=\"startCalibration()\" style=\"padding: 5px 15px; margin-left: 10px; background: #4CAF50; color: white;\">Start</button>";
-  html += "</div>";
-  html += "<div id=\"calibrationControls\" style=\"display: none; margin: 15px 0; padding: 15px; background: #e8f5e9; border-radius: 5px;\">";
-  html += "<div style=\"margin: 10px 0;\">";
-  html += "<strong>Current Step Position: <span id=\"calStepPos\">0</span></strong>";
+  html += "<strong>Current Step Position: <span id=\"xStepPos\">0</span></strong>";
   html += "</div>";
   html += "<div style=\"margin: 10px 0;\">";
-  html += "<button onclick=\"calJog(-1000)\" style=\"padding: 8px 15px; margin: 2px; background: #f44336;\">-1000</button>";
-  html += "<button onclick=\"calJog(-100)\" style=\"padding: 8px 15px; margin: 2px; background: #ff9800;\">-100</button>";
-  html += "<button onclick=\"calJog(-10)\" style=\"padding: 8px 15px; margin: 2px; background: #ffc107;\">-10</button>";
-  html += "<button onclick=\"calJog(-1)\" style=\"padding: 8px 15px; margin: 2px; background: #ffeb3b;\">-1</button>";
-  html += "<button onclick=\"calStop()\" style=\"padding: 8px 15px; margin: 2px; background: #666; color: white;\">STOP</button>";
-  html += "<button onclick=\"calJog(1)\" style=\"padding: 8px 15px; margin: 2px; background: #4CAF50;\">+1</button>";
-  html += "<button onclick=\"calJog(10)\" style=\"padding: 8px 15px; margin: 2px; background: #8BC34A;\">+10</button>";
-  html += "<button onclick=\"calJog(100)\" style=\"padding: 8px 15px; margin: 2px; background: #9CCC65;\">+100</button>";
-  html += "<button onclick=\"calJog(1000)\" style=\"padding: 8px 15px; margin: 2px; background: #AED581;\">+1000</button>";
-  html += "</div>";
-  html += "<div style=\"margin: 15px 0; padding: 10px; background: #fff; border: 2px solid #4CAF50; border-radius: 5px;\">";
-  html += "<p style=\"margin: 5px 0;\"><strong>When you reach a limit:</strong></p>";
-  html += "<div style=\"margin: 10px 0;\">";
-  html += "<label>Direction you moved: </label>";
-  html += "<select id=\"limitDirection\" style=\"padding: 5px; margin: 0 5px;\">";
-  html += "<option value=\"positive\">Positive (+)</option>";
-  html += "<option value=\"negative\">Negative (-)</option>";
-  html += "</select>";
-  html += "<button onclick=\"setLimitFromCal()\" style=\"padding: 5px 15px; margin-left: 10px; background: #2196F3; color: white;\">Set This Limit</button>";
+  html += "<button onclick=\"calJog('X', -1000)\" style=\"padding: 8px 15px; margin: 2px; background: #f44336;\">-1000</button>";
+  html += "<button onclick=\"calJog('X', -100)\" style=\"padding: 8px 15px; margin: 2px; background: #ff9800;\">-100</button>";
+  html += "<button onclick=\"calJog('X', -10)\" style=\"padding: 8px 15px; margin: 2px; background: #ffc107;\">-10</button>";
+  html += "<button onclick=\"calJog('X', -1)\" style=\"padding: 8px 15px; margin: 2px; background: #ffeb3b;\">-1</button>";
+  html += "<button onclick=\"calStop('X')\" style=\"padding: 8px 15px; margin: 2px; background: #666; color: white;\">STOP</button>";
+  html += "<button onclick=\"calJog('X', 1)\" style=\"padding: 8px 15px; margin: 2px; background: #4CAF50;\">+1</button>";
+  html += "<button onclick=\"calJog('X', 10)\" style=\"padding: 8px 15px; margin: 2px; background: #8BC34A;\">+10</button>";
+  html += "<button onclick=\"calJog('X', 100)\" style=\"padding: 8px 15px; margin: 2px; background: #9CCC65;\">+100</button>";
+  html += "<button onclick=\"calJog('X', 1000)\" style=\"padding: 8px 15px; margin: 2px; background: #AED581;\">+1000</button>";
   html += "</div>";
   html += "<div style=\"margin: 10px 0;\">";
-  html += "<strong>Current Limits:</strong><br>";
-  html += "Min: <span id=\"calMin\">Not set</span> | Max: <span id=\"calMax\">Not set</span>";
+  html += "<button onclick=\"setStepLimit('X', 'min')\" style=\"padding: 8px 20px; background: #2196F3; color: white; margin-right: 10px;\">Set X Min (Left)</button>";
+  html += "<button onclick=\"setStepLimit('X', 'max')\" style=\"padding: 8px 20px; background: #4CAF50; color: white;\">Set X Max (Right)</button>";
+  html += "</div>";
+  html += "<div style=\"margin: 10px 0; font-size: 0.9em;\">";
+  html += "<strong>X Limits:</strong> Min: <span id=\"xMinStep\">Not set</span> | Max: <span id=\"xMaxStep\">Not set</span>";
   html += "</div>";
   html += "</div>";
-  html += "<button onclick=\"finishCalibration()\" style=\"padding: 8px 20px; background: #4CAF50; color: white; margin-top: 10px;\">Finish Calibration</button>";
+  
+  // Y-Axis Calibration
+  html += "<div style=\"margin: 10px 0; padding: 10px; background: #fff; border-radius: 5px;\">";
+  html += "<h3 style=\"margin-top: 0;\">Y-Axis</h3>";
+  html += "<div style=\"margin: 10px 0;\">";
+  html += "<strong>Current Step Position: <span id=\"yStepPos\">0</span></strong>";
+  html += "</div>";
+  html += "<div style=\"margin: 10px 0;\">";
+  html += "<button onclick=\"calJog('Y', -1000)\" style=\"padding: 8px 15px; margin: 2px; background: #f44336;\">-1000</button>";
+  html += "<button onclick=\"calJog('Y', -100)\" style=\"padding: 8px 15px; margin: 2px; background: #ff9800;\">-100</button>";
+  html += "<button onclick=\"calJog('Y', -10)\" style=\"padding: 8px 15px; margin: 2px; background: #ffc107;\">-10</button>";
+  html += "<button onclick=\"calJog('Y', -1)\" style=\"padding: 8px 15px; margin: 2px; background: #ffeb3b;\">-1</button>";
+  html += "<button onclick=\"calStop('Y')\" style=\"padding: 8px 15px; margin: 2px; background: #666; color: white;\">STOP</button>";
+  html += "<button onclick=\"calJog('Y', 1)\" style=\"padding: 8px 15px; margin: 2px; background: #4CAF50;\">+1</button>";
+  html += "<button onclick=\"calJog('Y', 10)\" style=\"padding: 8px 15px; margin: 2px; background: #8BC34A;\">+10</button>";
+  html += "<button onclick=\"calJog('Y', 100)\" style=\"padding: 8px 15px; margin: 2px; background: #9CCC65;\">+100</button>";
+  html += "<button onclick=\"calJog('Y', 1000)\" style=\"padding: 8px 15px; margin: 2px; background: #AED581;\">+1000</button>";
+  html += "</div>";
+  html += "<div style=\"margin: 10px 0;\">";
+  html += "<button onclick=\"setStepLimit('Y', 'min')\" style=\"padding: 8px 20px; background: #2196F3; color: white; margin-right: 10px;\">Set Y Min (Bottom)</button>";
+  html += "<button onclick=\"setStepLimit('Y', 'max')\" style=\"padding: 8px 20px; background: #4CAF50; color: white;\">Set Y Max (Top)</button>";
+  html += "</div>";
+  html += "<div style=\"margin: 10px 0; font-size: 0.9em;\">";
+  html += "<strong>Y Limits:</strong> Min: <span id=\"yMinStep\">Not set</span> | Max: <span id=\"yMaxStep\">Not set</span>";
+  html += "</div>";
+  html += "</div>";
+  
+  html += "<div style=\"margin: 15px 0; padding: 10px; background: #fff3cd; border-radius: 5px;\">";
+  html += "<button onclick=\"applyCalibration()\" style=\"padding: 10px 30px; background: #4CAF50; color: white; font-size: 1.1em; font-weight: bold;\">Apply Calibration</button>";
+  html += "<p style=\"margin: 10px 0 0 0; font-size: 0.9em;\">This will calculate the work area in mm from the step limits and steps/mm settings above.</p>";
+  html += "</div>";
   html += "</div>";
   html += "</div>";
   html += "</div>";
@@ -542,120 +555,73 @@ String getHTMLPage() {
   html += "const mode = document.getElementById('stepMode').value;";
   html += "fetch('/setstepmode?mode=' + mode).then(() => showStatus('Step mode set to ' + mode + '. Please restart ESP32 for changes to take effect.'));";
   html += "}";
-  html += "function setStepsPerMM(axis) {";
-  html += "const value = parseFloat(document.getElementById('stepsPerMM_' + axis).value);";
-  html += "fetch('/setstepspermm?axis=' + axis + '&value=' + value).then(() => {";
-  html += "showStatus('Steps per mm (' + axis + ') set to ' + value);";
-  html += "updateCanvas();";
-  html += "});";
-  html += "}";
-  html += "function setWorkArea() {";
-  html += "const minX = parseFloat(document.getElementById('minX').value);";
-  html += "const maxX = parseFloat(document.getElementById('maxX').value);";
-  html += "const minY = parseFloat(document.getElementById('minY').value);";
-  html += "const maxY = parseFloat(document.getElementById('maxY').value);";
-  html += "fetch('/setworkarea?minX=' + minX + '&maxX=' + maxX + '&minY=' + minY + '&maxY=' + maxY).then(() => {";
-  html += "showStatus('Work area updated');";
-  html += "updateCanvas();";
+  // Mechanical Parameters functions
+  html += "function setFullStepsPerRev() {";
+  html += "const value = parseInt(document.getElementById('fullStepsPerRev').value);";
+  html += "fetch('/setfullstepsperrev?value=' + value).then(() => {";
+  html += "showStatus('Full steps per revolution set to ' + value);";
   html += "location.reload();";
   html += "});";
   html += "}";
-  html += "function setLimit(axis, limit) {";
-  html += "fetch('/getposition').then(r => r.json()).then(pos => {";
-  html += "const value = limit === 'min' ? (axis === 'X' ? pos.x : pos.y) : (axis === 'X' ? pos.x : pos.y);";
-  html += "fetch('/setworkarealimit?axis=' + axis + '&limit=' + limit + '&value=' + value.toFixed(2)).then(() => {";
-  html += "showStatus(axis + ' ' + limit + ' set to ' + value.toFixed(2) + ' mm');";
+  html += "function setLinearTravelPerRev() {";
+  html += "const value = parseFloat(document.getElementById('linearTravelPerRev').value);";
+  html += "fetch('/setlineartravelperrev?value=' + value).then(() => {";
+  html += "showStatus('Linear travel per revolution set to ' + value + ' mm');";
   html += "location.reload();";
   html += "});";
+  html += "}";
+  html += "function setFullStepsPerMM(axis) {";
+  html += "const value = parseFloat(document.getElementById('fullStepsPerMM_' + axis).value);";
+  html += "fetch('/setfullstepspermm?axis=' + axis + '&value=' + value).then(() => {";
+  html += "showStatus('Full steps/mm (' + axis + ') set to ' + value);";
+  html += "location.reload();";
   html += "});";
   html += "}";
-  html += "let calibrating = false;";
-  html += "let calAxis = 'X';";
-  html += "let calMotor = 1;";
-  html += "let calMinStep = null;";
-  html += "let calMaxStep = null;";
-  html += "document.getElementById('motor1Axis').addEventListener('change', function() {";
-  html += "const m1 = this.value;";
-  html += "document.getElementById('motor2Axis').textContent = (m1 === 'X' ? 'Y' : 'X') + '-Axis';";
-  html += "});";
-  html += "document.getElementById('calAxis').addEventListener('change', function() {";
-  html += "calAxis = this.value;";
-  html += "const m1Axis = document.getElementById('motor1Axis').value;";
-  html += "calMotor = (calAxis === m1Axis) ? 1 : 2;";
-  html += "calMinStep = null;";
-  html += "calMaxStep = null;";
-  html += "updateCalLimits();";
-  html += "});";
-  html += "function startCalibration() {";
-  html += "calAxis = document.getElementById('calAxis').value;";
-  html += "const m1Axis = document.getElementById('motor1Axis').value;";
-  html += "calMotor = (calAxis === m1Axis) ? 1 : 2;";
-  html += "calibrating = true;";
-  html += "calMinStep = null;";
-  html += "calMaxStep = null;";
-  html += "document.getElementById('calibrationControls').style.display = 'block';";
-  html += "updateCalPosition();";
-  html += "updateCalLimits();";
-  html += "setInterval(updateCalPosition, 200);";
+  
+  // Simplified calibration functions
+  html += "function calJog(axis, steps) {";
+  html += "const motor = (axis === 'X') ? 1 : 2;";
+  html += "fetch('/moverel?motor=' + motor + '&steps=' + steps);";
   html += "}";
-  html += "function updateCalPosition() {";
-  html += "if (!calibrating) return;";
+  html += "function calStop(axis) {";
+  html += "const motor = (axis === 'X') ? 1 : 2;";
+  html += "fetch('/stop?motor=' + motor);";
+  html += "}";
+  html += "function setStepLimit(axis, limit) {";
   html += "fetch('/status').then(r => r.json()).then(data => {";
-  html += "const pos = calMotor === 1 ? data.motor1.position : data.motor2.position;";
-  html += "document.getElementById('calStepPos').textContent = pos;";
+  html += "const motor = (axis === 'X') ? 1 : 2;";
+  html += "const stepPos = (motor === 1) ? data.motor1.position : data.motor2.position;";
+  html += "fetch('/setsteplimit?axis=' + axis + '&limit=' + limit + '&steps=' + stepPos).then(() => {";
+  html += "showStatus(axis + ' ' + limit + ' set to ' + stepPos + ' steps');";
+  html += "updateStepLimits();";
+  html += "});";
   html += "});";
   html += "}";
-  html += "function calJog(steps) {";
-  html += "fetch('/moverel?motor=' + calMotor + '&steps=' + steps);";
-  html += "}";
-  html += "function calStop() {";
-  html += "fetch('/stop?motor=' + calMotor);";
-  html += "}";
-  html += "function setLimitFromCal() {";
-  html += "const stepPos = parseInt(document.getElementById('calStepPos').textContent);";
-  html += "const direction = document.getElementById('limitDirection').value;";
-  html += "if (direction === 'positive') {";
-  html += "calMaxStep = stepPos;";
-  html += "} else {";
-  html += "calMinStep = stepPos;";
-  html += "}";
-  html += "updateCalLimits();";
-  html += "fetch('/setsteplimit?axis=' + calAxis + '&limit=' + direction + '&steps=' + stepPos).then(() => {";
-  html += "showStatus('Limit set: ' + direction + ' = ' + stepPos + ' steps');";
-  html += "});";
-  html += "}";
-  html += "function updateCalLimits() {";
-  html += "const minText = calMinStep !== null ? calMinStep + ' steps' : 'Not set';";
-  html += "const maxText = calMaxStep !== null ? calMaxStep + ' steps' : 'Not set';";
-  html += "document.getElementById('calMin').textContent = minText;";
-  html += "document.getElementById('calMax').textContent = maxText;";
-  html += "}";
-  html += "function finishCalibration() {";
-  html += "if (calMinStep === null || calMaxStep === null) {";
-  html += "showStatus('Please set both min and max limits first', true);";
-  html += "return;";
-  html += "}";
-  html += "const m1Axis = document.getElementById('motor1Axis').value;";
-  html += "fetch('/finishcalibration?motor1Axis=' + m1Axis + '&xMin=' + (calAxis === 'X' ? calMinStep : '') + '&xMax=' + (calAxis === 'X' ? calMaxStep : '') + '&yMin=' + (calAxis === 'Y' ? calMinStep : '') + '&yMax=' + (calAxis === 'Y' ? calMaxStep : '')).then(() => {";
-  html += "showStatus('Calibration complete! You can now set physical dimensions (steps/mm)');";
-  html += "location.reload();";
-  html += "});";
-  html += "}";
-  html += "function calibrateFromPhysical(axis) {";
-  html += "const measured = axis === 'X' ? parseFloat(document.getElementById('measuredXWidth').value) : parseFloat(document.getElementById('measuredYHeight').value);";
-  html += "if (measured <= 0) {";
-  html += "showStatus('Please enter a valid measurement > 0', true);";
-  html += "return;";
-  html += "}";
-  html += "fetch('/calibratefromphysical?axis=' + axis + '&size=' + measured).then(r => r.text()).then(result => {";
+  html += "function applyCalibration() {";
+  html += "fetch('/applycalibration').then(r => r.text()).then(result => {";
   html += "if (result === 'ok') {";
-  html += "showStatus('Calibration complete! Steps/mm and work area updated for ' + axis + ' axis.');";
+  html += "showStatus('Calibration applied! Work area calculated from step limits.');";
   html += "location.reload();";
   html += "} else {";
   html += "showStatus('Error: ' + result, true);";
   html += "}";
   html += "});";
   html += "}";
+  html += "function updateStepLimits() {";
+  html += "fetch('/getsteplimits').then(r => r.json()).then(data => {";
+  html += "document.getElementById('xMinStep').textContent = data.xMin !== 0 ? data.xMin + ' steps' : 'Not set';";
+  html += "document.getElementById('xMaxStep').textContent = data.xMax !== 0 ? data.xMax + ' steps' : 'Not set';";
+  html += "document.getElementById('yMinStep').textContent = data.yMin !== 0 ? data.yMin + ' steps' : 'Not set';";
+  html += "document.getElementById('yMaxStep').textContent = data.yMax !== 0 ? data.yMax + ' steps' : 'Not set';";
+  html += "});";
+  html += "}";
+  html += "setInterval(function() {";
+  html += "fetch('/status').then(r => r.json()).then(data => {";
+  html += "document.getElementById('xStepPos').textContent = data.motor1.position;";
+  html += "document.getElementById('yStepPos').textContent = data.motor2.position;";
+  html += "});";
+  html += "}, 200);";
+  html += "updateStepLimits();";
   html += "function flipDirection(axis) {";
   html += "fetch('/flipdirection?axis=' + axis).then(() => {";
   html += "fetch('/getdirection').then(r => r.json()).then(data => {";
@@ -1333,7 +1299,82 @@ void handleGcode() {
   }
 }
 
-void handleSetStepsPerMM() {
+void handleSetFullStepsPerRev() {
+  if (server.hasArg("value")) {
+    int value = server.arg("value").toInt();
+    
+    if (value < 1 || value > 200) {
+      server.send(400, "text/plain", "error: invalid value (1-200)");
+      return;
+    }
+    
+    fullStepsPerRev = value;
+    
+    // Save to preferences
+    preferences.begin("mechanical", false);
+    preferences.putInt("fullStepsPerRev", fullStepsPerRev);
+    preferences.end();
+    
+    // Recalculate and update motion controller
+    float fullStepsPerMM = calculateFullStepsPerMM();
+    float microstepsPerMM_X = calculateMicrostepsPerMM('X');
+    float microstepsPerMM_Y = calculateMicrostepsPerMM('Y');
+    motionController.setStepsPerMM(microstepsPerMM_X, microstepsPerMM_Y);
+    
+    Serial.print("Full steps per revolution set to: ");
+    Serial.println(fullStepsPerRev);
+    Serial.print("Recalculated: Full steps/mm = ");
+    Serial.print(fullStepsPerMM, 3);
+    Serial.print(", Microsteps/mm X = ");
+    Serial.print(microstepsPerMM_X, 3);
+    Serial.print(", Y = ");
+    Serial.println(microstepsPerMM_Y, 3);
+    
+    server.send(200, "text/plain", "ok");
+  } else {
+    server.send(400, "text/plain", "error: missing parameter");
+  }
+}
+
+void handleSetLinearTravelPerRev() {
+  if (server.hasArg("value")) {
+    float value = server.arg("value").toFloat();
+    
+    if (value <= 0 || value > 100) {
+      server.send(400, "text/plain", "error: invalid value (0.1-100)");
+      return;
+    }
+    
+    linearTravelPerRev = value;
+    
+    // Save to preferences
+    preferences.begin("mechanical", false);
+    preferences.putFloat("linearTravelPerRev", linearTravelPerRev);
+    preferences.end();
+    
+    // Recalculate and update motion controller
+    float fullStepsPerMM = calculateFullStepsPerMM();
+    float microstepsPerMM_X = calculateMicrostepsPerMM('X');
+    float microstepsPerMM_Y = calculateMicrostepsPerMM('Y');
+    motionController.setStepsPerMM(microstepsPerMM_X, microstepsPerMM_Y);
+    
+    Serial.print("Linear travel per revolution set to: ");
+    Serial.print(linearTravelPerRev, 2);
+    Serial.println(" mm");
+    Serial.print("Recalculated: Full steps/mm = ");
+    Serial.print(fullStepsPerMM, 3);
+    Serial.print(", Microsteps/mm X = ");
+    Serial.print(microstepsPerMM_X, 3);
+    Serial.print(", Y = ");
+    Serial.println(microstepsPerMM_Y, 3);
+    
+    server.send(200, "text/plain", "ok");
+  } else {
+    server.send(400, "text/plain", "error: missing parameter");
+  }
+}
+
+void handleSetFullStepsPerMM() {
   if (server.hasArg("axis") && server.hasArg("value")) {
     String axis = server.arg("axis");
     float value = server.arg("value").toFloat();
@@ -1343,30 +1384,39 @@ void handleSetStepsPerMM() {
       return;
     }
     
-    float x = motionController.getStepsPerMM_X();
-    float y = motionController.getStepsPerMM_Y();
-    
+    // Save override to preferences
+    preferences.begin("mechanical", false);
     if (axis == "X" || axis == "x") {
-      x = value;
+      preferences.putFloat("fullStepsPerMM_X_override", value);
+      Serial.print("Full steps/mm X override set to: ");
     } else if (axis == "Y" || axis == "y") {
-      y = value;
+      preferences.putFloat("fullStepsPerMM_Y_override", value);
+      Serial.print("Full steps/mm Y override set to: ");
     } else {
+      preferences.end();
       server.send(400, "text/plain", "error: invalid axis");
       return;
     }
-    
-    motionController.setStepsPerMM(x, y);
-    
-    // Save to preferences
-    preferences.begin("plotter", false);
-    preferences.putFloat("stepsPerMM_X", x);
-    preferences.putFloat("stepsPerMM_Y", y);
     preferences.end();
     
-    Serial.print("Steps per mm updated: X=");
-    Serial.print(x, 2);
-    Serial.print(" Y=");
-    Serial.println(y, 2);
+    // Recalculate microsteps/mm with override
+    int microstepping = (axis == "X" || axis == "x") ? stepper1->getMicrostepping() : stepper2->getMicrostepping();
+    float microstepsPerMM = value * (float)microstepping;
+    
+    // Update motion controller
+    float x = motionController.getStepsPerMM_X();
+    float y = motionController.getStepsPerMM_Y();
+    if (axis == "X" || axis == "x") {
+      x = microstepsPerMM;
+    } else {
+      y = microstepsPerMM;
+    }
+    motionController.setStepsPerMM(x, y);
+    
+    Serial.print(value, 3);
+    Serial.print(" (microsteps/mm = ");
+    Serial.print(microstepsPerMM, 3);
+    Serial.println(")");
     
     server.send(200, "text/plain", "ok");
   } else {
@@ -1538,7 +1588,7 @@ void handleSetStepLimit() {
     // Save step limits to preferences (in steps, not mm)
     preferences.begin("calibration", false);
     if (axisStr == "X" || axisStr == "x") {
-      if (limitStr == "positive" || limitStr == "max") {
+      if (limitStr == "max") {
         preferences.putLong("xMaxSteps", steps);
         Serial.print("X-axis max steps set to: ");
       } else {
@@ -1546,7 +1596,7 @@ void handleSetStepLimit() {
         Serial.print("X-axis min steps set to: ");
       }
     } else {
-      if (limitStr == "positive" || limitStr == "max") {
+      if (limitStr == "max") {
         preferences.putLong("yMaxSteps", steps);
         Serial.print("Y-axis max steps set to: ");
       } else {
@@ -1561,6 +1611,86 @@ void handleSetStepLimit() {
   } else {
     server.send(400, "text/plain", "error: missing parameters");
   }
+}
+
+void handleGetStepLimits() {
+  preferences.begin("calibration", true);
+  long xMinSteps = preferences.getLong("xMinSteps", 0);
+  long xMaxSteps = preferences.getLong("xMaxSteps", 0);
+  long yMinSteps = preferences.getLong("yMinSteps", 0);
+  long yMaxSteps = preferences.getLong("yMaxSteps", 0);
+  preferences.end();
+  
+  String json = "{";
+  // Use 0 as sentinel value - JavaScript will check for 0 vs null
+  json += "\"xMin\":" + String(xMinSteps) + ",";
+  json += "\"xMax\":" + String(xMaxSteps) + ",";
+  json += "\"yMin\":" + String(yMinSteps) + ",";
+  json += "\"yMax\":" + String(yMaxSteps);
+  json += "}";
+  
+  server.send(200, "application/json", json);
+}
+
+void handleApplyCalibration() {
+  // Load step limits from preferences
+  preferences.begin("calibration", true);
+  long xMinSteps = preferences.getLong("xMinSteps", 0);
+  long xMaxSteps = preferences.getLong("xMaxSteps", 0);
+  long yMinSteps = preferences.getLong("yMinSteps", 0);
+  long yMaxSteps = preferences.getLong("yMaxSteps", 0);
+  preferences.end();
+  
+  // Check if limits are set
+  if (xMinSteps == 0 && xMaxSteps == 0 && yMinSteps == 0 && yMaxSteps == 0) {
+    server.send(400, "text/plain", "error: no step limits set. Please set limits first.");
+    return;
+  }
+  
+  // Ensure min < max (swap if needed)
+  if (xMinSteps > xMaxSteps) { long temp = xMinSteps; xMinSteps = xMaxSteps; xMaxSteps = temp; }
+  if (yMinSteps > yMaxSteps) { long temp = yMinSteps; yMinSteps = yMaxSteps; yMaxSteps = temp; }
+  
+  // Get microsteps/mm for each axis
+  float microstepsPerMM_X = calculateMicrostepsPerMM('X');
+  float microstepsPerMM_Y = calculateMicrostepsPerMM('Y');
+  
+  // Convert step limits to mm
+  float minX_mm = xMinSteps / microstepsPerMM_X;
+  float maxX_mm = xMaxSteps / microstepsPerMM_X;
+  float minY_mm = yMinSteps / microstepsPerMM_Y;
+  float maxY_mm = yMaxSteps / microstepsPerMM_Y;
+  
+  // Set work area
+  motionController.setWorkArea(minX_mm, maxX_mm, minY_mm, maxY_mm);
+  
+  // Save work area to preferences
+  preferences.begin("plotter", false);
+  preferences.putFloat("minX", minX_mm);
+  preferences.putFloat("maxX", maxX_mm);
+  preferences.putFloat("minY", minY_mm);
+  preferences.putFloat("maxY", maxY_mm);
+  preferences.end();
+  
+  Serial.print("Calibration applied! Work area: X[");
+  Serial.print(minX_mm, 1);
+  Serial.print(",");
+  Serial.print(maxX_mm, 1);
+  Serial.print("] Y[");
+  Serial.print(minY_mm, 1);
+  Serial.print(",");
+  Serial.print(maxY_mm, 1);
+  Serial.print("] mm (from step limits: X[");
+  Serial.print(xMinSteps);
+  Serial.print(",");
+  Serial.print(xMaxSteps);
+  Serial.print("] Y[");
+  Serial.print(yMinSteps);
+  Serial.print(",");
+  Serial.print(yMaxSteps);
+  Serial.println("])");
+  
+  server.send(200, "text/plain", "ok");
 }
 
 void handleFinishCalibration() {
@@ -1832,6 +1962,12 @@ void setup() {
   int savedPowerHolding = preferences.getInt("powerHolding", 120);
   preferences.end();
   
+  // Load mechanical parameters from preferences
+  preferences.begin("mechanical", true);  // Read-only mode
+  fullStepsPerRev = preferences.getInt("fullStepsPerRev", 20);
+  linearTravelPerRev = preferences.getFloat("linearTravelPerRev", 3.0);
+  preferences.end();
+  
   // Load pen settings from preferences
   preferences.begin("pen", true);  // Read-only mode
   penUpAngle = preferences.getInt("penUpAngle", 0);
@@ -1919,10 +2055,36 @@ void setup() {
   motionController.setPenDownAngle(penDownAngle);
   motionController.setDotDwellMs(dotDwellMs);
   
+  // Calculate microsteps/mm from mechanical parameters
+  float fullStepsPerMM = calculateFullStepsPerMM();
+  float microstepsPerMM_X = calculateMicrostepsPerMM('X');
+  float microstepsPerMM_Y = calculateMicrostepsPerMM('Y');
+  
+  // Check for overrides in preferences
+  preferences.begin("mechanical", true);
+  float overrideX = preferences.getFloat("fullStepsPerMM_X_override", 0.0);
+  float overrideY = preferences.getFloat("fullStepsPerMM_Y_override", 0.0);
+  preferences.end();
+  
+  if (overrideX > 0) {
+    microstepsPerMM_X = overrideX * (float)stepper1->getMicrostepping();
+    Serial.print("Using X-axis override: ");
+    Serial.print(overrideX, 3);
+    Serial.print(" full steps/mm = ");
+    Serial.print(microstepsPerMM_X, 3);
+    Serial.println(" microsteps/mm");
+  }
+  if (overrideY > 0) {
+    microstepsPerMM_Y = overrideY * (float)stepper2->getMicrostepping();
+    Serial.print("Using Y-axis override: ");
+    Serial.print(overrideY, 3);
+    Serial.print(" full steps/mm = ");
+    Serial.print(microstepsPerMM_Y, 3);
+    Serial.println(" microsteps/mm");
+  }
+  
   // Load saved configuration from preferences
   preferences.begin("plotter", true);  // Read-only mode
-  float savedStepsPerMM_X = preferences.getFloat("stepsPerMM_X", STEPS_PER_MM_X);
-  float savedStepsPerMM_Y = preferences.getFloat("stepsPerMM_Y", STEPS_PER_MM_Y);
   float savedMinX = preferences.getFloat("minX", MIN_X_MM);
   float savedMaxX = preferences.getFloat("maxX", MAX_X_MM);
   float savedMinY = preferences.getFloat("minY", MIN_Y_MM);
@@ -1932,16 +2094,16 @@ void setup() {
   preferences.end();
   
   // Apply saved configuration
-  motionController.setStepsPerMM(savedStepsPerMM_X, savedStepsPerMM_Y);
+  motionController.setStepsPerMM(microstepsPerMM_X, microstepsPerMM_Y);
   motionController.setWorkArea(savedMinX, savedMaxX, savedMinY, savedMaxY);
   motionController.setInvertX(savedInvertX);
   motionController.setInvertY(savedInvertY);
   
   Serial.print("Loaded configuration: ");
-  Serial.print("Steps/mm X=");
-  Serial.print(savedStepsPerMM_X, 2);
+  Serial.print("Microsteps/mm X=");
+  Serial.print(microstepsPerMM_X, 3);
   Serial.print(" Y=");
-  Serial.print(savedStepsPerMM_Y, 2);
+  Serial.print(microstepsPerMM_Y, 3);
   Serial.print(" | Work area X[");
   Serial.print(savedMinX, 1);
   Serial.print(",");
@@ -1968,10 +2130,20 @@ void setup() {
   Serial.print(motorPowerRunning);
   Serial.print(" Holding: ");
   Serial.println(motorPowerHolding);
-  Serial.print("Steps per mm - X: ");
-  Serial.print(STEPS_PER_MM_X);
-  Serial.print(" Y: ");
-  Serial.println(STEPS_PER_MM_Y);
+  Serial.print("Mechanical parameters: ");
+  Serial.print(fullStepsPerRev);
+  Serial.print(" steps/rev, ");
+  Serial.print(linearTravelPerRev, 2);
+  Serial.print(" mm/rev");
+  Serial.print(" | Microstepping: X=");
+  Serial.print(stepper1->getMicrostepping());
+  Serial.print("x Y=");
+  Serial.print(stepper2->getMicrostepping());
+  Serial.print("x");
+  Serial.print(" | Microsteps/mm: X=");
+  Serial.print(microstepsPerMM_X, 3);
+  Serial.print(" Y=");
+  Serial.println(microstepsPerMM_Y, 3);
   Serial.println("G-code interpreter ready. Send commands via serial.");
   
   // Setup WiFi and Web Server
@@ -1994,17 +2166,22 @@ void setup() {
   server.on("/testpen", handleTestPen);
   server.on("/setservoangle", handleSetServoAngle);
   server.on("/gcode", handleGcode);
-  server.on("/setstepspermm", handleSetStepsPerMM);
-  server.on("/setworkarea", handleSetWorkArea);
+  // Mechanical parameters
+  server.on("/setfullstepsperrev", handleSetFullStepsPerRev);
+  server.on("/setlineartravelperrev", handleSetLinearTravelPerRev);
+  server.on("/setfullstepspermm", handleSetFullStepsPerMM);
+  
+  // Calibration
+  server.on("/setsteplimit", handleSetStepLimit);
+  server.on("/getsteplimits", handleGetStepLimits);
+  server.on("/applycalibration", handleApplyCalibration);
+  
+  // Work area and position
   server.on("/getworkarea", handleGetWorkArea);
   server.on("/getposition", handleGetPosition);
   server.on("/flipdirection", handleFlipDirection);
   server.on("/getdirection", handleGetDirection);
   server.on("/sethomeposition", handleSetHomePosition);
-  server.on("/setworkarealimit", handleSetWorkAreaLimit);
-  server.on("/setsteplimit", handleSetStepLimit);
-  server.on("/finishcalibration", handleFinishCalibration);
-  server.on("/calibratefromphysical", handleCalibrateFromPhysical);
   server.on("/queuestatus", handleQueueStatus);
   server.on("/uploadgcode", HTTP_POST, handleUploadGcode);
   

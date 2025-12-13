@@ -211,3 +211,14 @@ void TMC2209Driver::setSpreadCycle(bool enable) {
     tmcDriver->en_spreadCycle(enable);
 }
 
+int TMC2209Driver::getMicrostepping() const {
+    // TMC2209 microstepping is configured via UART
+    // Default is 16x as set in pin_config_xiao_esp32s3.h
+    // We could query it from the driver, but for simplicity return the configured value
+    #ifdef BOARD_XIAO_ESP32S3
+        return TMC2209_MICROSTEPS;  // Defined in pin config (16)
+    #else
+        return 16;  // Default for TMC2209
+    #endif
+}
+

@@ -11,7 +11,8 @@ TB6612Driver::TB6612Driver(int stepMode,
       pwmChannelA(channelA),
       pwmChannelB(channelB),
       currentPower(255),
-      enabled(true)
+      enabled(true),
+      stepMode(stepMode)
 {
     // Constructor - begin() will be called later to initialize hardware
 }
@@ -104,5 +105,16 @@ void TB6612Driver::disable() {
     // Set power to 0 when disabled
     ledcWrite(pwmChannelA, 0);
     ledcWrite(pwmChannelB, 0);
+}
+
+int TB6612Driver::getMicrostepping() const {
+    // TB6612 uses AccelStepper step modes:
+    // FULL4WIRE = 1x (full step)
+    // HALF4WIRE = 2x (half step)
+    if (stepMode == AccelStepper::FULL4WIRE) {
+        return 1;  // Full step
+    } else {
+        return 2;  // Half step (default)
+    }
 }
 
