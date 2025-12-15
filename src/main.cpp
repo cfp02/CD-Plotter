@@ -91,10 +91,12 @@ unsigned long lastServoWrite = 0; // Track when servo was last written
                                   MOTOR2_PWMA, MOTOR2_PWMB,
                                   PWM_CHANNEL_M2A, PWM_CHANNEL_M2B);
 #elif defined(DRIVER_TMC2209)
-    // Shared UART for both TMC2209 drivers
+    // UART is optional - set to NULL if not using UART (using MS1/MS2 pins instead)
+    // To disable UART, comment out tmcUart.begin() in setup() and change &tmcUart to nullptr below
     HardwareSerial tmcUart(TMC_UART_NUM);
     
-    // TMC2209 drivers with shared UART
+    // TMC2209 drivers - pass &tmcUart if using UART, or nullptr if not
+    // If not using UART, drivers will use hardware MS1/MS2 pin settings for microstepping
     TMC2209Driver stepper1_driver(MOTOR1_STEP, MOTOR1_DIR, MOTOR_EN,
                                    &tmcUart, TMC2209_ADDRESS_MOTOR1, TMC2209_RSENSE);
     
@@ -2002,14 +2004,33 @@ void setup() {
   // No need to configure them in code
   
   #ifdef DRIVER_TMC2209
-    // Initialize shared UART for TMC2209 drivers
-    // Must be done before driver begin() calls
+    // UART is OPTIONAL for TMC2209 drivers
+    // 
+    // UART provides:
+    //   - Dynamic current control (run/hold via software)
+    //   - StealthChop mode (silent operation)
+    //   - Diagnostics (read actual microstepping, status)
+    //
+    // UART is NOT needed if:
+    //   - Using MS1/MS2 pins for microstepping (hardware pins)
+    //   - Using potentiometer for current control
+    //   - Don't need StealthChop (motors will be noisier but still work)
+    //
+    // To DISABLE UART (use MS1/MS2 pins only):
+    //   1. Comment out the tmcUart.begin() line below
+    //   2. Change &tmcUart to nullptr in driver instantiation above
+    
+    // Uncomment to enable UART:
     tmcUart.begin(TMC_UART_BAUD, SERIAL_8N1, TMC_UART_RX, TMC_UART_TX);
     delay(100);  // Give UART time to initialize
     Serial.print("TMC2209 UART initialized on RX=");
     Serial.print(TMC_UART_RX);
     Serial.print(" TX=");
     Serial.println(TMC_UART_TX);
+    Serial.println("(UART is optional - comment out tmcUart.begin() to disable)");
+    
+    // To disable UART, comment out the tmcUart.begin() line above
+    // Drivers will then use hardware MS1/MS2 pin settings for microstepping
   #endif
   
   // Initialize stepper drivers (handles PWM/UART setup internally)
@@ -2135,15 +2156,25 @@ void setup() {
   Serial.print(" steps/rev, ");
   Serial.print(linearTravelPerRev, 2);
   Serial.print(" mm/rev");
-  Serial.print(" | Microstepping: X=");
+  Serial.print(" | Microstepping: X=1/");
   Serial.print(stepper1->getMicrostepping());
-  Serial.print("x Y=");
+  Serial.print(" Y=1/");
   Serial.print(stepper2->getMicrostepping());
-  Serial.print("x");
   Serial.print(" | Microsteps/mm: X=");
   Serial.print(microstepsPerMM_X, 3);
   Serial.print(" Y=");
   Serial.println(microstepsPerMM_Y, 3);
+  
+  // Diagnostic: Check if microstepping matches between axes
+  int microX = stepper1->getMicrostepping();
+  int microY = stepper2->getMicrostepping();
+  if (microX != microY) {
+    Serial.print("WARNING: X and Y axes have different microstepping! X=1/");
+    Serial.print(microX);
+    Serial.print(" Y=1/");
+    Serial.println(microY);
+    Serial.println("This will cause different step counts for the same physical distance!");
+  }
   Serial.println("G-code interpreter ready. Send commands via serial.");
   
   // Setup WiFi and Web Server

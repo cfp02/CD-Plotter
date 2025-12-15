@@ -56,7 +56,19 @@
 // TMC2209 Configuration Constants
 // ====================================================================
 #define TMC2209_RSENSE 0.11f    // Sense resistor value (ohms) - typical for SilentStepStick
-#define TMC2209_MICROSTEPS 16   // Microstepping: 1/16 (as requested)
+
+// Microstepping setting - IMPORTANT: Match this to your MS1/MS2 pin configuration!
+// If using hardware MS1/MS2 pins (not UART), set this to match your pin settings:
+//   MS1 floating, MS2 floating → defaults to 1/8  microstepping → set to 8
+//   MS1 LOW,  MS2 LOW  → 1/8  microstepping → set to 8
+//   MS1 LOW,  MS2 HIGH → 1/32 microstepping → set to 32
+//   MS1 HIGH, MS2 LOW  → 1/64 microstepping → set to 64
+//   MS1 HIGH, MS2 HIGH → 1/16 microstepping → set to 16
+// If using UART, this value will be written to the driver (overrides MS1/MS2 pins)
+// 
+// EASIEST: Leave MS1/MS2 floating (not connected) → defaults to 1/8 → set to 8
+#define TMC2209_MICROSTEPS 8   // Microstepping: 1/8 (default when MS1/MS2 are floating)
+
 #define TMC2209_CURRENT_RUN_MA 800   // Running current in mA (adjust based on motor)
 #define TMC2209_CURRENT_HOLD_MA 400  // Holding current in mA (50% of running)
 

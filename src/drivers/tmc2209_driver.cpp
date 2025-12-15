@@ -34,53 +34,68 @@ void TMC2209Driver::begin() {
     pinMode(enablePin, OUTPUT);
     digitalWrite(enablePin, HIGH);  // Disabled by default (active low)
     
-    // Initialize UART if not already done
-    // Note: UART should be initialized once for both drivers (shared UART)
-    // We'll check if it's already initialized by checking if it's available
+    // UART is optional - if not provided, driver uses hardware MS1/MS2 pin settings
     if (uartSerial) {
-        // UART initialization will be handled in main.cpp for shared UART
-        // Just verify it's configured
+        // Initialize UART if provided
+        // Note: UART should be initialized once for both drivers (shared UART)
         delay(10);  // Small delay for UART stability
-    }
-    
-    // Create TMC2209 driver instance for UART communication
-    // TMC2209Stepper constructor: (HardwareSerial* SerialPort, float RS, uint8_t addr)
-    if (!tmcDriver && uartSerial) {
-        tmcDriver = new TMC2209Stepper(uartSerial, rsense, uartAddress);
-        tmcDriver->begin();
-    }
-    
-    // Configure TMC2209 registers via UART
-    if (tmcDriver) {
-        // Set microstepping to 1/16 (as requested)
-        tmcDriver->microsteps(TMC2209_MICROSTEPS);
         
-        // Set current (run and hold)
-        tmcDriver->rms_current(TMC2209_CURRENT_RUN_MA);  // Set RMS current
-        
-        // Calculate and set holding current
-        int ihold = (TMC2209_CURRENT_HOLD_MA * 32) / 9600;
-        if (ihold > 31) ihold = 31;
-        if (ihold < 1) ihold = 1;
-        tmcDriver->ihold(ihold);
-        
-        // Enable stealthChop for silent operation
-        tmcDriver->en_spreadCycle(false);  // Disable spreadCycle = enable stealthChop
-        tmcDriver->pwm_autoscale(true);    // Enable automatic PWM scaling
-        tmcDriver->pwm_autograd(true);     // Enable automatic PWM gradient
-        
-        // Test communication
-        uint32_t drv_status = tmcDriver->DRV_STATUS();
-        if (drv_status == 0xFFFFFFFF || drv_status == 0) {
-            Serial.print("Warning: TMC2209 communication may have failed (address ");
-            Serial.print(uartAddress);
-            Serial.println(")");
-        } else {
-            Serial.print("TMC2209 initialized (address ");
-            Serial.print(uartAddress);
-            Serial.print(") - DRV_STATUS: 0x");
-            Serial.println(drv_status, HEX);
+        // Create TMC2209 driver instance for UART communication
+        // TMC2209Stepper constructor: (HardwareSerial* SerialPort, float RS, uint8_t addr)
+        if (!tmcDriver) {
+            tmcDriver = new TMC2209Stepper(uartSerial, rsense, uartAddress);
+            tmcDriver->begin();
         }
+        
+        // Configure TMC2209 registers via UART (optional features)
+        if (tmcDriver) {
+            // Set microstepping via UART (overrides MS1/MS2 pins if UART works)
+            tmcDriver->microsteps(TMC2209_MICROSTEPS);
+            
+            // Set current (run and hold) - only works via UART
+            tmcDriver->rms_current(TMC2209_CURRENT_RUN_MA);
+            
+            // Calculate and set holding current
+            int ihold = (TMC2209_CURRENT_HOLD_MA * 32) / 9600;
+            if (ihold > 31) ihold = 31;
+            if (ihold < 1) ihold = 1;
+            tmcDriver->ihold(ihold);
+            
+            // Enable stealthChop for silent operation (optional, only via UART)
+            tmcDriver->en_spreadCycle(false);  // Disable spreadCycle = enable stealthChop
+            tmcDriver->pwm_autoscale(true);    // Enable automatic PWM scaling
+            tmcDriver->pwm_autograd(true);     // Enable automatic PWM gradient
+            
+            // Test communication and verify configuration
+            uint32_t drv_status = tmcDriver->DRV_STATUS();
+            uint32_t chopconf = tmcDriver->CHOPCONF();
+            
+            if (drv_status == 0xFFFFFFFF || drv_status == 0 || 
+                chopconf == 0xFFFFFFFF || chopconf == 0) {
+                Serial.print("TMC2209 (address ");
+                Serial.print(uartAddress);
+                Serial.println("): UART communication failed - using hardware MS1/MS2 pin settings");
+                Serial.println("  (This is OK if you're using MS1/MS2 pins for microstepping)");
+            } else {
+                // Extract and display actual microstepping
+                uint8_t mres = (chopconf >> 0) & 0x0F;
+                int actualMicrosteps = 256 >> mres;
+                
+                Serial.print("TMC2209 (address ");
+                Serial.print(uartAddress);
+                Serial.print("): UART OK - microstepping: 1/");
+                Serial.print(actualMicrosteps);
+                Serial.print(" (MRES=");
+                Serial.print(mres);
+                Serial.println(")");
+            }
+        }
+    } else {
+        // No UART provided - driver will use hardware MS1/MS2 pin settings
+        Serial.print("TMC2209 (address ");
+        Serial.print(uartAddress);
+        Serial.println("): No UART - using hardware MS1/MS2 pin settings for microstepping");
+        Serial.println("  (Set MS1/MS2 pins: LOW/LOW=1/8, LOW/HIGH=1/32, HIGH/LOW=1/64, HIGH/HIGH=1/16)");
     }
     
     // Enable the driver
@@ -212,9 +227,31 @@ void TMC2209Driver::setSpreadCycle(bool enable) {
 }
 
 int TMC2209Driver::getMicrostepping() const {
-    // TMC2209 microstepping is configured via UART
-    // Default is 16x as set in pin_config_xiao_esp32s3.h
-    // We could query it from the driver, but for simplicity return the configured value
+    // Try to read actual microstepping from TMC2209 register via UART
+    // If UART is not available or communication fails, return configured/default value
+    if (tmcDriver) {
+        // Read CHOPCONF register - bits 0-3 contain MRES (microstep resolution)
+        uint32_t chopconf = tmcDriver->CHOPCONF();
+        
+        // Check if communication is working (0xFFFFFFFF or 0 indicates failure)
+        if (chopconf != 0xFFFFFFFF && chopconf != 0) {
+            // Extract MRES bits (bits 0-3)
+            uint8_t mres = (chopconf >> 0) & 0x0F;
+            
+            // Convert MRES to microstepping value
+            // MRES values: 0=256, 1=128, 2=64, 3=32, 4=16, 5=8, 6=4, 7=2, 8=1
+            int microsteps = 256;
+            if (mres <= 8) {
+                microsteps = 256 >> mres;
+            }
+            
+            return microsteps;
+        }
+    }
+    
+    // No UART or UART read failed - return configured value
+    // NOTE: If using hardware MS1/MS2 pins, you need to manually set this
+    // to match your pin configuration, or the code will assume the configured value
     #ifdef BOARD_XIAO_ESP32S3
         return TMC2209_MICROSTEPS;  // Defined in pin config (16)
     #else
